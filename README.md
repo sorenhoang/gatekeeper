@@ -25,26 +25,32 @@ The services are intentionally simple. The point of this project is the gateway:
 | Part | Choice |
 |---|---|
 | Gateway | Nginx (open source, official Docker image) |
-| Services | Go (standard library `net/http`, no framework) |
+| Services | Go (standard library `net/http`; WebSocket and gRPC libraries only from Phase 9) |
 | Orchestration | Docker Compose |
 | Load testing | k6, `wrk`, `curl` |
 | TLS (local) | mkcert |
 
-## Planned layout
+## Layout
 
 ```
 gatekeeper/
 ├── docker-compose.yml
-├── Makefile                 # up, down, reload, test, logs, loadtest
-├── nginx/
+├── Makefile                 # up, down, reload, test, logs
+├── nginx/                   # mounted at /etc/nginx/gatekeeper (nginx -c .../nginx.conf)
 │   ├── nginx.conf           # main context: workers, events, http
 │   ├── conf.d/              # one file per virtual server
 │   └── snippets/            # reusable blocks (proxy headers, ssl, cors)
-├── services/
-│   ├── user-service/
-│   ├── order-service/
-│   ├── product-service/
-│   └── auth-service/
+├── services/                # one Go module, one Dockerfile (ARG SERVICE)
+│   ├── go.mod
+│   ├── Dockerfile
+│   ├── internal/
+│   │   └── echo/            # shared handler: /health, JSON echo, chaos, request log
+│   ├── cmd/
+│   │   ├── user-service/
+│   │   ├── order-service/
+│   │   ├── product-service/
+│   │   └── auth-service/
+│   └── smoke/               # stack tests run by `make test`
 ├── frontend/                # static files served directly by Nginx
 ├── loadtest/                # k6 scripts
 └── certs/                   # local certificates (git-ignored)
@@ -52,14 +58,22 @@ gatekeeper/
 
 ## Getting started
 
-> Available after Phase 0 is done.
+Requires Docker (with Compose) and Go 1.23+. Only the gateway is published, on `localhost:8080`; the services are reachable only inside the compose network.
 
 ```bash
 make up        # build and start everything
-make test      # smoke test all routes through the gateway
+make test      # smoke test the stack (needs `make up` first; briefly restarts user-service only)
+make test-lifecycle  # make test + the tests that stop/recreate the stack
 make reload    # nginx -t && nginx -s reload (no downtime)
 make logs      # tail the gateway access log
-make down
+make down      # stop and remove all containers
+```
+
+Make a backend slow or flaky (never affects `/health`):
+
+```bash
+DELAY_MS=500 FAIL_RATE=0.2 docker compose up -d order-service
+docker compose up -d order-service    # back to normal
 ```
 
 ## Roadmap
