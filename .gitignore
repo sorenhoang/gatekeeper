@@ -1,0 +1,34 @@
+# Local learning notes
+docs/
+
+# Local TLS material
+certs/
+*.pem
+*.key
+*.crt
+
+# Nginx runtime data
+nginx/cache/
+nginx/logs/
+*.log
+
+# Go
+bin/
+*.exe
+*.test
+*.out
+coverage.*
+vendor/
+go.work
+go.work.sum
+
+# Load test output
+loadtest/results/
+
+# Env & editors
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
