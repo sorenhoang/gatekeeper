@@ -1,0 +1,6 @@
+{
+  "verify": "cd services && gofmt -l . | (! grep .) && go vet ./... && go test ./... && cd .. && docker compose config -q",
+  "smoke": "cd services && go build ./...",
+  "testGlobs": ["*_test.go"],
+  "retryBudget": 3
+}

@@ -32,3 +32,11 @@ loadtest/results/
 .idea/
 .vscode/
 .DS_Store
+
+# sr harness
+.sr/*
+!.sr/harness.json
+!.sr/features/
+.sr/features/*/*
+!.sr/features/*/design.md
+!.sr/features/*/plan.md
