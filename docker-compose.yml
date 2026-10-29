@@ -11,6 +11,8 @@ services:
     volumes:
       - ./nginx:/etc/nginx/gatekeeper:ro
       - ./frontend:/usr/share/nginx/html:ro
+      # Outside the main root on purpose: the main host must never serve it.
+      - ./admin:/usr/share/nginx/admin:ro
     ports:
       - "8080:80"
     depends_on: [user-service, order-service, product-service, auth-service]

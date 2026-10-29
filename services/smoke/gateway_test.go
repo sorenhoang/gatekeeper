@@ -98,10 +98,12 @@ func TestShouldServeWelcomePageAtRoot(t *testing.T) {
 	}
 }
 
-func TestShouldReturn404ForUnknownPath(t *testing.T) {
-	resp, _ := get(t, "/nope", "")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("GET /nope = %d, want 404 (no routing to services yet)", resp.StatusCode)
+// Phase 1 replaced the phase-0 "/nope → 404": unknown browser paths now get
+// the SPA shell (missing assets still 404, see spa_test.go).
+func TestShouldServeSpaShellForUnknownPath(t *testing.T) {
+	resp, body := get(t, "/nope", "")
+	if resp.StatusCode != http.StatusOK || body != welcomePage(t) {
+		t.Errorf("GET /nope = %d, want 200 with frontend/index.html (SPA fallback)\n%s", resp.StatusCode, body)
 	}
 }
 
