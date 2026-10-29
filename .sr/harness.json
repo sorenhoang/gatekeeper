@@ -1,0 +1,6 @@
+{
+  "verify": "cd services && gofmt -l . | (! grep .) && go vet ./... && go test ./... && cd .. && { [ ! -f docker-compose.yml ] || { docker compose config -q && make up && (cd services && go test -count=1 -tags smoke,lifecycle ./smoke/); }; }",
+  "smoke": "cd services && go build ./...",
+  "testGlobs": ["*_test.go"],
+  "retryBudget": 3
+}

@@ -1,0 +1,37 @@
+# Only the gateway is published to the host; the services are reachable
+# solely over the compose network (Phase 8 relies on that).
+# DELAY_MS / FAIL_RATE pass through from the shell when set, e.g.
+#   DELAY_MS=5000 docker compose up -d order-service
+services:
+  gateway:
+    image: nginx:1.27-alpine
+    # Mount the directory, not single files: editors that replace a file on
+    # save leave a single-file bind mount pointing at the old inode.
+    command: ["nginx", "-c", "/etc/nginx/gatekeeper/nginx.conf", "-g", "daemon off;"]
+    volumes:
+      - ./nginx:/etc/nginx/gatekeeper:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    ports:
+      - "8080:80"
+    depends_on: [user-service, order-service, product-service, auth-service]
+    restart: "no"
+
+  user-service:
+    build: { context: ./services, args: { SERVICE: user-service } }
+    environment: [DELAY_MS, FAIL_RATE]
+    restart: "no"
+
+  order-service:
+    build: { context: ./services, args: { SERVICE: order-service } }
+    environment: [DELAY_MS, FAIL_RATE]
+    restart: "no"
+
+  product-service:
+    build: { context: ./services, args: { SERVICE: product-service } }
+    environment: [DELAY_MS, FAIL_RATE]
+    restart: "no"
+
+  auth-service:
+    build: { context: ./services, args: { SERVICE: auth-service } }
+    environment: [DELAY_MS, FAIL_RATE]
+    restart: "no"
