@@ -103,13 +103,42 @@ How Nginx picks a location: an exact `=` match wins at once. Otherwise it rememb
 | admin.localhost | /api/users/ | `admin` — the admin server has no API routes | nginx: 404 |
 | unknown.test | / | `spa` — no `server_name` matches → `default_server` | nginx: `index.html` |
 
+## Proxying
+
+Every proxied location includes `nginx/snippets/proxy-headers.conf`; no `proxy_set_header` lives anywhere else, because one in a location would drop all the inherited ones.
+
+What a backend receives (`curl -s localhost:8080/api/users/ | jq '.host, .headers'`):
+
+| Header | Value | Why |
+|---|---|---|
+| `Host`, `X-Forwarded-Host` | the client's host (`localhost`) | not the upstream name (`users`) |
+| `X-Forwarded-Proto` | `http` | `https` from Phase 7 |
+| `X-Forwarded-For`, `X-Real-IP` | the TCP peer of the gateway, one address | the gateway is the first hop: a client-sent value is **overwritten**, never appended |
+| `Forwarded` | removed | same reason |
+| `Connection` | empty, over HTTP/1.1 | ready for Phase 3's upstream keepalive |
+
+Read timeouts per route (the longest silence allowed from the backend): users 2s, products 5s, orders 15s; connect 1s everywhere. Errors nginx itself generates come back as JSON, e.g. `{"error":"gateway timeout","status":504,"route":"users"}`; a backend's own error passes through unchanged.
+
+Request bodies above 1 MB get a 413 before any backend is contacted; bodies above 16 KB are written to a temporary file first (`a client request body is buffered to a temporary file` in the gateway log).
+
+## Why a 502 or a 504
+
+Read the gateway error log (`docker compose logs gateway | grep error`). Each row is reproduced by the smoke suite.
+
+| Cause | Status | Error-log phrase | How to reproduce |
+|---|---|---|---|
+| No address: the service's container is gone, so Docker DNS has no answer | 502 | `no live upstreams` | `docker compose stop user-service`, wait 3s, then `curl -i localhost:8080/api/users/` |
+| Stale address: the IP nginx holds belongs to no container (the first ~2s after a stop, before nginx re-resolves) | 504 | `upstream timed out (110: Operation timed out) while connecting to upstream` | `docker compose stop user-service` and `curl` straight away (a race with the 2s re-resolve; the smoke test proxies to an unused IP to get it every time). Nothing refuses the connect, so it waits out `proxy_connect_timeout` (1s) |
+| Connection refused: the container is up but nothing listens on that port | 502 | `connect() failed (111: Connection refused)` | point a `proxy_pass` at `user-service:9999` and reload |
+| Timed out: the backend accepted the request but stayed silent past `proxy_read_timeout` | 504 | `upstream timed out (110: Operation timed out) while reading response header from upstream` | `DELAY_MS=3000 docker compose up -d user-service`, then `curl -i localhost:8080/api/users/x` |
+
 ## Roadmap
 
 | Phase | Topic | Status |
 |---|---|---|
 | 0 | Foundation: repo skeleton, Go services, Nginx anatomy | ☑ |
-| 1 | Static files & routing | ◐ |
-| 2 | Reverse proxy deep dive: headers, timeouts, buffering | ☐ |
+| 1 | Static files & routing | ☑ |
+| 2 | Reverse proxy deep dive: headers, timeouts, buffering | ◐ |
 | 3 | Load balancing & failover | ☐ |
 | 4 | Observability: logs, request ID, metrics | ☐ |
 | 5 | Rate limiting & protection | ☐ |
