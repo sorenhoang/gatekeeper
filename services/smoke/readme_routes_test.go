@@ -101,12 +101,13 @@ func TestShouldListEveryLocationAndThePrecedenceCasesInTheReadme(t *testing.T) {
 	}
 }
 
-func TestShouldMarkPhaseZeroDoneAndPhaseOneInProgress(t *testing.T) {
+// Updated each phase: the roadmap marks done phases ☑ and the current one ◐.
+func TestShouldMarkFinishedPhasesDoneAndTheCurrentOneInProgress(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := map[string]string{"| 0 |": "☑", "| 1 |": "◐"}
+	status := map[string]string{"| 0 |": "☑", "| 1 |": "☑", "| 2 |": "◐"}
 	for _, line := range strings.Split(string(b), "\n") {
 		for prefix, mark := range status {
 			if strings.HasPrefix(line, prefix) {
