@@ -15,7 +15,7 @@ services:
       - ./admin:/usr/share/nginx/admin:ro
     ports:
       - "8080:80"
-    depends_on: [user-service, order-service, product-service, auth-service]
+    depends_on: [user-service, order-service, order-service-2, order-service-3, product-service, auth-service]
     restart: "no"
 
   user-service:
@@ -23,10 +23,17 @@ services:
     environment: [DELAY_MS, FAIL_RATE]
     restart: "no"
 
-  order-service:
+  # Three named replicas of the same binary (echo `service` stays
+  # order-service; `hostname` tells them apart). Named, not `replicas: 3`, so
+  # chaos can target one: DELAY_MS=800 docker compose up -d order-service-2
+  order-service: &order-replica
     build: { context: ./services, args: { SERVICE: order-service } }
     environment: [DELAY_MS, FAIL_RATE]
     restart: "no"
+
+  order-service-2: *order-replica
+
+  order-service-3: *order-replica
 
   product-service:
     build: { context: ./services, args: { SERVICE: product-service } }
