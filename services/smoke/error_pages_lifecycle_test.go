@@ -57,7 +57,7 @@ func TestShouldAnswerJsonGatewayTimeoutWhenAServiceIsSlow(t *testing.T) {
 // proxy_intercept_errors stays off: only errors nginx itself generates get the
 // gateway page; a backend's own error is the backend's business.
 func TestShouldPassABackendsOwnErrorThroughUnchanged(t *testing.T) {
-	withServiceEnv(t, "order-service", "FAIL_RATE=1")
+	withOrderReplicasEnv(t, "FAIL_RATE=1")
 	r := timedGet(t, "/api/orders/x")
 	if r.status != http.StatusInternalServerError {
 		t.Fatalf("/api/orders/x with FAIL_RATE=1 = %d, want 500\n%s", r.status, r.body)

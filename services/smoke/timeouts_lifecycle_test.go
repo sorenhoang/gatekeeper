@@ -65,7 +65,7 @@ func TestShouldCutOffASlowUsersBackendAtTwoSeconds(t *testing.T) {
 }
 
 func TestShouldLetASlowOrdersBackendFinish(t *testing.T) {
-	withServiceEnv(t, "order-service", "DELAY_MS=3000")
+	withOrderReplicasEnv(t, "DELAY_MS=3000")
 	r := timedGet(t, "/api/orders/x")
 	if r.status != http.StatusOK {
 		t.Errorf("slow orders: status %d, want 200 (orders may take up to 15s)\n%s", r.status, r.body)
