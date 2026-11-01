@@ -175,6 +175,60 @@ docker compose up -d --no-deps --scale order-service-3=2 order-service-3   # 4 h
 docker compose up -d --no-deps --scale order-service-3=1 order-service-3   # back to 3, no failed request
 ```
 
+## Observability
+
+**Request id.** Every response from a routed location carries an `X-Request-ID`. Errors nginx raises before it picks a location (`400` for a malformed request, `414` for a URI that's too long) don't. The gateway forwards the same id to the service, and the service logs it as `request_id=…`.
+- **Client ids are kept only if well-formed:** an id you send is kept when it matches `^[A-Za-z0-9._-]{1,64}$`.
+- **Anything else is replaced** with nginx's 32-hex `$request_id`: spaces, `=`, over 64 chars, or two headers. Such a value could forge fields in the services' space-separated `key=value` logs.
+
+```bash
+curl -si -H 'X-Request-ID: my-trace-1' localhost:8080/api/users/ | grep -i x-request-id
+make trace ID=my-trace-1      # its gateway line and its service line
+```
+
+**Access log.** One JSON object per request (`escape=json`, every value a string). The gateway's own `/health` is not logged.
+```bash
+docker compose logs --no-log-prefix gateway | grep '^{' | tail -1 | jq .
+```
+
+| Field | Meaning |
+|---|---|
+| `time` | request end, ISO 8601 |
+| `request_id` | the id above |
+| `remote_addr`, `host`, `request`, `user_agent` | who asked for what |
+| `status`, `bytes` | what the client got |
+| `request_time` | first byte from the client → last byte sent to it: the whole request |
+| `route` | the `$route` of the location (`users`, `orders`, `admin`, …) |
+| `upstream` | upstream block name (`users`, `orders`, …). Empty when nginx answered itself, and also on the gateway's own JSON 502/504 lines: the `error_page` redirect clears it. Use `route` there |
+| `upstream_addr`, `upstream_status` | which server answered, and what it said |
+| `upstream_connect_time`, `upstream_header_time`, `upstream_response_time` | time to connect, to the first response byte, and to the whole response from the backend |
+
+Values to expect in the `upstream_*` fields:
+- **After a retry:** comma-separated lists, one value per server tried: `"172.19.0.6:8080, 127.0.0.1:8081"`.
+- **Requests nginx answers itself** (SPA, static, JSON 404): `""`.
+- **Something not measured:** a timing nginx never took (no connect happened, no header arrived) is `"-"`.
+- **No server address at all:** when a service is down and nginx had no server to try, `upstream_addr` is the upstream's name (`"users"`) instead of an IP.
+
+**Where the time went.**
+- **The backend:** `upstream_response_time` is time spent waiting on the backend(s).
+- **Everything else:** `request_time` minus that is client I/O (a slow upload or download) plus nginx's own work.
+- **Example:** `request_time` 2s with `upstream_response_time` 0.05s means the service was fast and the client was slow.
+- **Finding a slow service:** `DELAY_MS=1500 docker compose up -d product-service`, then read only the gateway log; products stands out at ≥ 1.5s. No service log is needed:
+  ```bash
+  docker compose logs --no-log-prefix gateway | grep '^{' \
+    | jq -r 'select(.upstream_response_time != "") | "\(.route)\t\(.upstream_response_time)"' | sort | uniq -c
+  ```
+- **Caveat:** with large responses, a slow client can also slow nginx's reads from the backend (response buffering fills up), so treat the split as exact only for small responses.
+
+**Counters.** nginx's `stub_status` page listens on `127.0.0.1:8082` inside the gateway only: not published, not reachable from the compose network. `make status` prints it:
+```
+Active connections: 2
+server accepts handled requests
+ 120 120 340
+Reading: 0 Writing: 1 Waiting: 1
+```
+A Prometheus exporter and Grafana are not part of the lab. To add them, run `nginx/nginx-prometheus-exporter` in compose with `--nginx.scrape-uri` pointing at a status listener it can reach.
+
 ## Roadmap
 
 | Phase | Topic | Status |
@@ -182,8 +236,8 @@ docker compose up -d --no-deps --scale order-service-3=1 order-service-3   # bac
 | 0 | Foundation: repo skeleton, Go services, Nginx anatomy | ☑ |
 | 1 | Static files & routing | ☑ |
 | 2 | Reverse proxy deep dive: headers, timeouts, buffering | ☑ |
-| 3 | Load balancing & failover | ◐ |
-| 4 | Observability: logs, request ID, metrics | ☐ |
+| 3 | Load balancing & failover | ☑ |
+| 4 | Observability: logs, request ID, metrics | ◐ |
 | 5 | Rate limiting & protection | ☐ |
 | 6 | Caching | ☐ |
 | 7 | TLS & HTTP/2 | ☐ |
