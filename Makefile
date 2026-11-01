@@ -8,7 +8,7 @@ API_ROUTES  := users orders products
 # 50 x 0.2s: how long `make up` waits for each route before only warning.
 READY_TRIES := 50
 
-.PHONY: up down reload logs test test-lifecycle
+.PHONY: up down reload logs status trace test test-lifecycle
 
 # A smoke run killed mid-test can leave a broken zz-smoke-*.conf behind, which
 # would stop the gateway from starting.
@@ -38,6 +38,20 @@ reload:
 
 logs:
 	docker compose logs -f --tail=20 gateway
+
+# Every log line for one request id, gateway and services: make trace ID=<id>
+# The shell reads ID from the environment (make itself still expands `$` in
+# it), and grep matches it as a fixed string. "No line found" (grep exit 1) is
+# not an error; failing to read the logs at all is.
+export ID
+trace:
+	@test -n "$$ID" || { echo "usage: make trace ID=<request id>" >&2; exit 2; }
+	@logs=$$(docker compose logs --no-color) || exit $$?; \
+		printf '%s\n' "$$logs" | grep -F -- "$$ID"; rc=$$?; [ $$rc -le 1 ]
+
+# stub_status listens on loopback inside the gateway only (status.conf).
+status:
+	docker compose exec -T gateway wget -qO- -T 2 http://127.0.0.1:8082/nginx_status
 
 test:
 	cd services && go test -count=1 -tags smoke ./smoke/
