@@ -35,7 +35,7 @@ func warmClient(t *testing.T, n int) *http.Client {
 	t.Helper()
 	client := &http.Client{
 		Timeout:   10 * time.Second,
-		Transport: &http.Transport{MaxIdleConnsPerHost: n, MaxConnsPerHost: n, IdleConnTimeout: 30 * time.Second},
+		Transport: &http.Transport{TLSClientConfig: labTLS.Clone(), MaxIdleConnsPerHost: n, MaxConnsPerHost: n, IdleConnTimeout: 30 * time.Second},
 	}
 	var wg sync.WaitGroup
 	start := make(chan struct{})

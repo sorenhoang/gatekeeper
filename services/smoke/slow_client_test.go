@@ -9,7 +9,9 @@ import (
 )
 
 // A slowloris-style client: send part of the headers, then nothing. nginx
-// must hang up after client_header_timeout (5s), without answering.
+// must hang up after client_header_timeout (5s), without answering. Since
+// Phase 7 :8080 is the redirect server; the timeouts are set at http level
+// (nginx.conf), so it shows the same cut-off the HTTPS servers apply.
 func TestShouldCutOffAClientThatStopsSendingHeaders(t *testing.T) {
 	conn, err := net.Dial("tcp", "localhost:8080")
 	if err != nil {

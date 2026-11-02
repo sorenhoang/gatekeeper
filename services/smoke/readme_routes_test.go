@@ -61,7 +61,7 @@ func routeTable(t *testing.T) []routeRow {
 func TestShouldMatchEveryReadmeRouteRowAgainstTheLiveGateway(t *testing.T) {
 	for _, row := range routeTable(t) {
 		host := row.host
-		if host == "localhost:8080" {
+		if host == "localhost:8443" {
 			host = ""
 		}
 		r := mustRoute(t, host, row.url)
@@ -107,7 +107,7 @@ func TestShouldMarkFinishedPhasesDoneAndTheCurrentOneInProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := map[string]string{"| 0 |": "☑", "| 1 |": "☑", "| 2 |": "☑", "| 3 |": "☑", "| 4 |": "☑", "| 5 |": "☑", "| 6 |": "◐"}
+	status := map[string]string{"| 0 |": "☑", "| 1 |": "☑", "| 2 |": "☑", "| 3 |": "☑", "| 4 |": "☑", "| 5 |": "☑", "| 6 |": "☑", "| 7 |": "◐"}
 	for _, line := range strings.Split(string(b), "\n") {
 		for prefix, mark := range status {
 			if strings.HasPrefix(line, prefix) {
