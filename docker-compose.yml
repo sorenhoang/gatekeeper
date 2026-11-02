@@ -15,6 +15,8 @@ services:
       - ./admin:/usr/share/nginx/admin:ro
       # From `make certs`; never committed.
       - ./certs:/etc/nginx/certs:ro
+      # Only the gateway's half of `make secrets`: never the signing key.
+      - ./secrets/gateway:/etc/nginx/secrets:ro
     ports:
       - "8080:80"
       - "8443:443"
@@ -46,4 +48,7 @@ services:
   auth-service:
     build: { context: ./services, args: { SERVICE: auth-service } }
     environment: [DELAY_MS, FAIL_RATE]
+    # Signing key and lab users from `make secrets`.
+    volumes:
+      - ./secrets/auth:/etc/gatekeeper/auth:ro
     restart: "no"

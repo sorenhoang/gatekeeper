@@ -40,3 +40,6 @@ loadtest/results/
 .sr/features/*/*
 !.sr/features/*/design.md
 !.sr/features/*/plan.md
+
+# Lab secrets from make secrets
+/secrets/

@@ -30,7 +30,8 @@ func TestShouldAnswerHealthFromTheGatewayItself(t *testing.T) {
 }
 
 func TestShouldAnswerUnknownApiPathsWithJson404(t *testing.T) {
-	for _, path := range []string{"/api/unknown", "/api/usersX", "/api/", "/api/auth/login"} {
+	// /api/auth/login was unrouted here until Phase 8 made it the login route.
+	for _, path := range []string{"/api/unknown", "/api/usersX", "/api/", "/api/authX"} {
 		r := mustRoute(t, "", path)
 		if r.status != http.StatusNotFound {
 			t.Errorf("GET %s = %d, want 404\n%s", path, r.status, r.body)

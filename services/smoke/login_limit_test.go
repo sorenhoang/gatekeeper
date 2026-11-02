@@ -10,7 +10,9 @@ import (
 	"time"
 )
 
-const loginPath = "/api/users/login"
+// Since Phase 8 login is auth-service's POST /login; the spikes send GET, so
+// the requests that pass the limit are answered 405.
+const loginPath = "/api/auth/login"
 
 type tooMany struct {
 	Error  string `json:"error"`
@@ -42,17 +44,16 @@ func TestShouldLetElevenLoginsThroughASpikeAndRejectTheRest(t *testing.T) {
 	afterDrain(t)
 	since := time.Now().Add(-time.Second)
 	hits := spike(t, 50, "", loginPath, nil)
-	if c := countStatus(hits); c[200] != 11 || c[429] != 39 {
-		t.Fatalf("50 parallel logins → %v, want 11 × 200 and 39 × 429 (1 + burst 10, nodelay)", c)
+	if c := countStatus(hits); c[405] != 11 || c[429] != 39 {
+		t.Fatalf("50 parallel logins → %v, want 11 × 405 and 39 × 429 (1 + burst 10, nodelay)", c)
 	}
 
 	var rejected []hit
 	for _, h := range hits {
 		switch h.status {
-		case http.StatusOK:
-			var e echoed
-			if err := json.Unmarshal([]byte(h.body), &e); err != nil || e.Service != "user-service" || e.Path != "/login" {
-				t.Errorf("200 login not from user-service /login: %q", h.body)
+		case http.StatusMethodNotAllowed:
+			if !strings.Contains(h.body, "use POST") {
+				t.Errorf("405 login not from auth-service /login: %q", h.body)
 			}
 		case http.StatusTooManyRequests:
 			assertTooMany(t, h, "login")
@@ -81,8 +82,8 @@ func TestShouldAcceptALoginAgainAfterRetryAfter(t *testing.T) {
 		t.Fatalf("setup: the spike was not limited (%v)", c)
 	}
 	time.Sleep(time.Second) // Retry-After: 1; 5r/s frees 5 slots per second
-	if r := withIDs(t, http.MethodGet, "", loginPath, nil); r.status != http.StatusOK {
-		t.Errorf("login 1s after the spike = %d, want 200", r.status)
+	if r := withIDs(t, http.MethodGet, "", loginPath, nil); r.status != http.StatusMethodNotAllowed {
+		t.Errorf("login 1s after the spike = %d, want 405 (answered, not limited)", r.status)
 	}
 }
 

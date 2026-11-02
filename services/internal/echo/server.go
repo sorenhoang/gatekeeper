@@ -20,15 +20,23 @@ const (
 
 // Run serves the echo backend until SIGTERM/SIGINT, then drains in-flight
 // requests. Invalid chaos config is returned before listening.
-func Run(service string) error {
+func Run(service string) error { return RunWith(service, nil) }
+
+// RunWith is Run with a service's own routes added to the echo mux; they go
+// through the same chaos and logging middleware.
+func RunWith(service string, routes func(*http.ServeMux)) error {
 	cfg, err := LoadConfig(os.Getenv)
 	if err != nil {
 		return fmt.Errorf("%s: %w", service, err)
 	}
 
+	mux := Handler(service, listenPort)
+	if routes != nil {
+		routes(mux)
+	}
 	srv := &http.Server{
 		Addr:    ":" + listenPort,
-		Handler: Wrap(Handler(service, listenPort), service, cfg, os.Stdout),
+		Handler: Wrap(mux, service, cfg, os.Stdout),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
