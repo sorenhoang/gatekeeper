@@ -8,11 +8,16 @@ API_ROUTES  := users orders products
 # 50 x 0.2s: how long `make up` waits for each route before only warning.
 READY_TRIES := 50
 
-.PHONY: up down reload logs status trace test test-lifecycle
+.PHONY: certs up down reload logs status trace test test-lifecycle
+
+# Lab CA + gateway certificate in certs/ (gitignored); keeps valid files,
+# reissues a leaf that expires within 30 days. CERTS_DIR overrides the folder.
+certs:
+	@./scripts/certs.sh
 
 # A smoke run killed mid-test can leave a broken zz-smoke-*.conf behind, which
 # would stop the gateway from starting.
-up:
+up: certs
 	rm -f nginx/conf.d/zz-smoke-*.conf
 	docker compose up -d --build --wait
 	@# A reload re-resolves the upstreams now (measured: 0.2s vs ~3s for a
@@ -21,7 +26,7 @@ up:
 	$(NGINX) -s reload
 	@for route in $(API_ROUTES); do \
 		for i in $$(seq $(READY_TRIES)); do \
-			curl -fs -o /dev/null localhost:8080/api/$$route/ && break; \
+			curl -fs -o /dev/null --cacert certs/ca.pem https://localhost:8443/api/$$route/ && break; \
 			[ $$i -eq $(READY_TRIES) ] && echo "warning: /api/$$route/ not answering yet" >&2; \
 			sleep 0.2; \
 		done; \

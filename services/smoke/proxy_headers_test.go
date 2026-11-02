@@ -66,8 +66,8 @@ func TestShouldTellBackendsTheHostAndSchemeTheClientUsed(t *testing.T) {
 		if got := e.one(t, "X-Forwarded-Host"); got != "localhost" {
 			t.Errorf("%s: X-Forwarded-Host = %q, want localhost", path, got)
 		}
-		if got := e.one(t, "X-Forwarded-Proto"); got != "http" {
-			t.Errorf("%s: X-Forwarded-Proto = %q, want http", path, got)
+		if got := e.one(t, "X-Forwarded-Proto"); got != "https" {
+			t.Errorf("%s: X-Forwarded-Proto = %q, want https", path, got)
 		}
 	}
 }

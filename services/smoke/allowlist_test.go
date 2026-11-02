@@ -18,7 +18,7 @@ const allowlistBurst = 150
 func burstFromGateway(t *testing.T, addr string) (rejected int, perSecond float64) {
 	t.Helper()
 	script := `n=0; for i in $(seq ` + itoa(allowlistBurst) + `); do ` +
-		`wget -q -O /dev/null "http://` + addr + `/api/products/" 2>&1 | grep -q 429 && n=$((n+1)); ` +
+		`wget -q -O /dev/null --no-check-certificate "https://` + addr + `:443/api/products/" 2>&1 | grep -q 429 && n=$((n+1)); ` +
 		`done; echo "rejected=$n"`
 	start := time.Now()
 	out := mustCompose(t, "exec", "-T", "gateway", "sh", "-c", script)

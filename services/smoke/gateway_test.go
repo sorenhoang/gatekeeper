@@ -3,6 +3,8 @@
 package smoke
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,13 +17,32 @@ import (
 )
 
 const (
-	gatewayURL = "http://localhost:8080"
+	// Since Phase 7 the app is served over HTTPS only; :8080 redirects.
+	gatewayURL = "https://localhost:8443"
 	// The gateway runs nginx with -c on the mounted directory, so every nginx
 	// command in the container must name the same file.
 	nginxConf = "/etc/nginx/gatekeeper/nginx.conf"
 )
 
 var confDir = filepath.Join(repoRoot, "nginx", "conf.d")
+
+// labTLS trusts the lab CA from `make certs`. Without the file every HTTPS
+// request fails with a certificate error that names the cause.
+var labTLS = func() *tls.Config {
+	pool := x509.NewCertPool()
+	if b, err := os.ReadFile(filepath.Join(repoRoot, "certs", "ca.pem")); err == nil {
+		pool.AppendCertsFromPEM(b)
+	}
+	return &tls.Config{RootCAs: pool}
+}()
+
+// Clients built without a Transport use the default one; it keeps HTTP/2
+// (ForceAttemptHTTP2 is already true on it). Every transport takes its own
+// Clone: HTTP/2 setup appends "h2" to the config it is given, and a shared
+// one would make HTTP/1.1-only transports offer h2 they can't speak.
+func init() {
+	http.DefaultTransport.(*http.Transport).TLSClientConfig = labTLS.Clone()
+}
 
 func get(t *testing.T, path, host string) (*http.Response, string) {
 	t.Helper()
@@ -74,6 +95,10 @@ func gatewayStartedAt(t *testing.T) string {
 func writeConf(t *testing.T, name, content string) {
 	t.Helper()
 	path := filepath.Join(confDir, name)
+	// Since Phase 7 the tests talk HTTPS to :8443, so a temporary server
+	// written as `listen 80;` also answers on 443 with the lab certificate.
+	content = strings.ReplaceAll(content, "listen 80;",
+		"listen 80;\n    listen 443 ssl;\n    http2 on;\n    include /etc/nginx/gatekeeper/snippets/tls.conf;")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}

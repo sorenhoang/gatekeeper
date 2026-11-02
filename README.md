@@ -28,14 +28,15 @@ The services are intentionally simple. The point of this project is the gateway:
 | Services | Go (standard library `net/http`; WebSocket and gRPC libraries only from Phase 9) |
 | Orchestration | Docker Compose |
 | Load testing | k6, `wrk`, `curl` |
-| TLS (local) | mkcert |
+| TLS (local) | openssl (mkcert optional) |
 
 ## Layout
 
 ```
 gatekeeper/
 ├── docker-compose.yml
-├── Makefile                 # up, down, reload, test, logs
+├── Makefile                 # certs, up, down, reload, test, logs
+├── scripts/certs.sh         # lab CA + gateway certificate (make certs)
 ├── nginx/                   # mounted at /etc/nginx/gatekeeper (nginx -c .../nginx.conf)
 │   ├── nginx.conf           # main context: workers, events, http
 │   ├── conf.d/              # one file per virtual server
@@ -54,14 +55,15 @@ gatekeeper/
 ├── frontend/                # static files served directly by Nginx (SPA shell + assets/)
 ├── admin/                   # admin.localhost content, outside the main root
 ├── loadtest/                # k6 scripts
-└── certs/                   # local certificates (git-ignored)
+└── certs/                   # made by make certs, git-ignored, mounted read-only
 ```
 
 ## Getting started
 
-Requires Docker (with Compose) and Go 1.23+. Only the gateway is published, on `localhost:8080`; the services are reachable only inside the compose network.
+Requires Docker (with Compose) and Go 1.23+. Only the gateway is published: HTTPS on `localhost:8443` (the app) and plain HTTP on `localhost:8080` (redirects to HTTPS, plus `/health`); the services are reachable only inside the compose network. `make up` creates the lab certificates on first run (`certs/`, never committed); point curl at the lab CA once per shell with `export CURL_CA_BUNDLE=$PWD/certs/ca.pem` and the examples below work as written (checked with macOS curl 8.7; if your curl ignores the variable, add `--cacert certs/ca.pem`).
 
 ```bash
+make certs     # lab CA + gateway certificate in certs/ (make up runs it)
 make up        # build and start everything
 make test      # smoke test the stack (needs `make up` first; briefly restarts user-service only)
 make test-lifecycle  # make test + the tests that stop/recreate the stack
@@ -85,20 +87,20 @@ How Nginx picks a location: an exact `=` match wins at once. Otherwise it rememb
 
 | Host | URL | Winning location (X-Route) | Answered by |
 |---|---|---|---|
-| localhost:8080 | /api/users/42 | `users` — `^~ /api/users/` | user-service, sees `/42` |
-| localhost:8080 | /api/users/ | `users` — `^~ /api/users/` | user-service, sees `/` |
-| localhost:8080 | /api/users | `users` — `^~ /api/users/` (needs the slash) | nginx: 301 to `/api/users/` (automatic for a `proxy_pass` prefix ending in `/`) |
-| localhost:8080 | /api/orders/7 | `orders` — `^~ /api/orders/` | order-service, sees `/7` |
-| localhost:8080 | /api/products/7 | `products` — `^~ /api/products/` | product-service, sees `/7` |
-| localhost:8080 | /api/products/logo.png | `products` — `^~` beats the asset regex | product-service, sees `/logo.png` |
-| localhost:8080 | /api/usersX | `api-404` — `^~ /api/` (no slash after `users`) | nginx: JSON 404 |
-| localhost:8080 | /api/unknown | `api-404` — `^~ /api/` | nginx: JSON 404 |
-| localhost:8080 | /health | `health` — `= /health` beats `/` | nginx: `{"status":"ok","from":"gateway"}` |
-| localhost:8080 | /healthz | `spa` — exact match needs the exact URI | nginx: `index.html` |
-| localhost:8080 | /assets/app.css | `static` — regex `\.(css\|js\|png…)$` beats `/` | nginx: the file |
-| localhost:8080 | /assets/missing.png | `static` — regex beats `/` | nginx: 404 from `try_files $uri =404`, never the shell |
-| localhost:8080 | /settings | `spa` — no regex matches, so the longest prefix `/` wins | nginx: `index.html` (SPA fallback) |
-| localhost:8080 | / | `spa` — `/` | nginx: `index.html` |
+| localhost:8443 | /api/users/42 | `users` — `^~ /api/users/` | user-service, sees `/42` |
+| localhost:8443 | /api/users/ | `users` — `^~ /api/users/` | user-service, sees `/` |
+| localhost:8443 | /api/users | `users` — `^~ /api/users/` (needs the slash) | nginx: 301 to `/api/users/` (automatic for a `proxy_pass` prefix ending in `/`) |
+| localhost:8443 | /api/orders/7 | `orders` — `^~ /api/orders/` | order-service, sees `/7` |
+| localhost:8443 | /api/products/7 | `products` — `^~ /api/products/` | product-service, sees `/7` |
+| localhost:8443 | /api/products/logo.png | `products` — `^~` beats the asset regex | product-service, sees `/logo.png` |
+| localhost:8443 | /api/usersX | `api-404` — `^~ /api/` (no slash after `users`) | nginx: JSON 404 |
+| localhost:8443 | /api/unknown | `api-404` — `^~ /api/` | nginx: JSON 404 |
+| localhost:8443 | /health | `health` — `= /health` beats `/` | nginx: `{"status":"ok","from":"gateway"}` |
+| localhost:8443 | /healthz | `spa` — exact match needs the exact URI | nginx: `index.html` |
+| localhost:8443 | /assets/app.css | `static` — regex `\.(css\|js\|png…)$` beats `/` | nginx: the file |
+| localhost:8443 | /assets/missing.png | `static` — regex beats `/` | nginx: 404 from `try_files $uri =404`, never the shell |
+| localhost:8443 | /settings | `spa` — no regex matches, so the longest prefix `/` wins | nginx: `index.html` (SPA fallback) |
+| localhost:8443 | / | `spa` — `/` | nginx: `index.html` |
 | admin.localhost | / | `admin` — admin server, `/` | nginx: `admin/index.html` |
 | admin.localhost | /api/users/ | `admin` — the admin server has no API routes | nginx: 404 |
 | unknown.test | / | `spa` — no `server_name` matches → `default_server` | nginx: `index.html` |
@@ -107,12 +109,12 @@ How Nginx picks a location: an exact `=` match wins at once. Otherwise it rememb
 
 Every proxied location includes `nginx/snippets/proxy-headers.conf`; no `proxy_set_header` lives anywhere else, because one in a location would drop all the inherited ones.
 
-What a backend receives (`curl -s localhost:8080/api/users/ | jq '.host, .headers'`):
+What a backend receives (`curl -s https://localhost:8443/api/users/ | jq '.host, .headers'`):
 
 | Header | Value | Why |
 |---|---|---|
 | `Host`, `X-Forwarded-Host` | the client's host (`localhost`) | not the upstream name (`users`) |
-| `X-Forwarded-Proto` | `http` | `https` from Phase 7 |
+| `X-Forwarded-Proto` | `https` | the app is HTTPS-only since Phase 7 |
 | `X-Forwarded-For`, `X-Real-IP` | the TCP peer of the gateway, one address | the gateway is the first hop: a client-sent value is **overwritten**, never appended |
 | `Forwarded` | removed | same reason |
 | `Connection` | empty, over HTTP/1.1 | ready for Phase 3's upstream keepalive |
@@ -127,17 +129,17 @@ Read the gateway error log (`docker compose logs gateway | grep error`). Each ro
 
 | Cause | Status | Error-log phrase | How to reproduce |
 |---|---|---|---|
-| No address: the service's container is gone, so Docker DNS has no answer | 502 | `no live upstreams` | `docker compose stop user-service`, wait 3s, then `curl -i localhost:8080/api/users/` |
+| No address: the service's container is gone, so Docker DNS has no answer | 502 | `no live upstreams` | `docker compose stop user-service`, wait 3s, then `curl -i https://localhost:8443/api/users/` |
 | Stale address: the IP nginx holds belongs to no container (the first ~2s after a stop, before nginx re-resolves) | 504 | `upstream timed out (110: Operation timed out) while connecting to upstream` | `docker compose stop user-service` and `curl` straight away (a race with the 2s re-resolve; the smoke test proxies to an unused IP to get it every time). Nothing refuses the connect, so it waits out `proxy_connect_timeout` (1s) |
 | Connection refused: the container is up but nothing listens on that port | 502 | `connect() failed (111: Connection refused)` | point a `proxy_pass` at `user-service:9999` and reload |
-| Timed out: the backend accepted the request but stayed silent past `proxy_read_timeout` | 504 | `upstream timed out (110: Operation timed out) while reading response header from upstream` | `DELAY_MS=3000 docker compose up -d user-service`, then `curl -i localhost:8080/api/users/x` |
+| Timed out: the backend accepted the request but stayed silent past `proxy_read_timeout` | 504 | `upstream timed out (110: Operation timed out) while reading response header from upstream` | `DELAY_MS=3000 docker compose up -d user-service`, then `curl -i https://localhost:8443/api/users/x` |
 
 ## Load balancing
 
 Orders runs as three named replicas (`order-service`, `order-service-2`, `order-service-3`), one `server … resolve` line each in `upstream orders`. They run the same binary: the echo's `service` is always `order-service`, and `hostname` (the container id) tells them apart.
 
 ```bash
-for i in $(seq 1 12); do curl -s localhost:8080/api/orders/ | jq -r .hostname; done | sort | uniq -c
+for i in $(seq 1 12); do curl -s https://localhost:8443/api/orders/ | jq -r .hostname; done | sort | uniq -c
 DELAY_MS=800 docker compose up -d order-service-2     # make one replica slow
 ```
 
@@ -182,7 +184,7 @@ docker compose up -d --no-deps --scale order-service-3=1 order-service-3   # bac
 - **Anything else is replaced** with nginx's 32-hex `$request_id`: spaces, `=`, over 64 chars, or two headers. Such a value could forge fields in the services' space-separated `key=value` logs.
 
 ```bash
-curl -si -H 'X-Request-ID: my-trace-1' localhost:8080/api/users/ | grep -i x-request-id
+curl -si -H 'X-Request-ID: my-trace-1' https://localhost:8443/api/users/ | grep -i x-request-id
 make trace ID=my-trace-1      # its gateway line and its service line
 ```
 
@@ -269,8 +271,8 @@ Measured: 50 parallel logins → 11 × 200, 39 × 429.
 **One gateway, one counter:** the zones live in this nginx's shared memory. Three gateways would each allow the full rate. Consistent limits across instances need a shared store (Redis), or sticky routing of each client to one gateway.
 
 ```bash
-seq 1 50 | xargs -P50 -I{} curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/api/users/login | sort | uniq -c
-curl -si localhost:8080/api/users/login | grep -iE 'HTTP|retry-after'
+seq 1 50 | xargs -P50 -I{} curl -s -o /dev/null -w '%{http_code}\n' https://localhost:8443/api/users/login | sort | uniq -c
+curl -si https://localhost:8443/api/users/login | grep -iE 'HTTP|retry-after'
 ```
 
 ## Caching
@@ -290,9 +292,9 @@ The gateway keeps a shared cache for `/api/products/*` only (`nginx/snippets/cac
 `X-Cache-Status` is `MISS`, `HIT`, `EXPIRED`, `STALE`, `UPDATING` or `BYPASS`; the access log has the same value in its `cache` field (empty for routes that aren't cached).
 
 ```bash
-curl -si localhost:8080/api/products/demo | grep -i x-cache   # MISS
-curl -si localhost:8080/api/products/demo | grep -i x-cache   # HIT
-curl -si -H 'Authorization: Bearer x' localhost:8080/api/products/demo | grep -i x-cache   # BYPASS
+curl -si https://localhost:8443/api/products/demo | grep -i x-cache   # MISS
+curl -si https://localhost:8443/api/products/demo | grep -i x-cache   # HIT
+curl -si -H 'Authorization: Bearer x' https://localhost:8443/api/products/demo | grep -i x-cache   # BYPASS
 ```
 
 Things to know:
@@ -319,6 +321,46 @@ Measured with product-service slowed to 300ms (`DELAY_MS=300`), ten GETs of one 
 | after (first GET, `MISS`) | 309ms | 1 |
 | after (GETs 2–10, `HIT`) | 0.2–0.5ms | 0 |
 
+## TLS & HTTP/2
+
+TLS ends at the gateway; the services stay plain HTTP/1.1 inside the compose network. Since Phase 7 the app is served on **HTTPS only**:
+
+| Port (host → container) | Serves |
+|---|---|
+| `8443 → 443` | the app, TLS 1.2/1.3, HTTP/2 via ALPN (HTTP/1.1 still works) |
+| `8080 → 80` | `/health` in plain HTTP; everything else is a redirect to the same path on `https://$host:8443` |
+
+**Certificates.** `make certs` (run by `make up`) uses openssl to create a lab CA (`certs/ca.pem`, 10 years) and a leaf for `localhost`, `admin.localhost` and `127.0.0.1` (398 days, the longest the browsers accept). Valid files are kept; a leaf within 30 days of expiry is reissued from the same CA. Everything in `certs/` is gitignored. Clients verify with the lab CA: `curl --cacert certs/ca.pem` or `export CURL_CA_BUNDLE=$PWD/certs/ca.pem`; the smoke tests load the same file. For a browser without warnings, either import `certs/ca.pem` into your trust store or use mkcert instead (`mkcert -install` adds its own CA to the system store, which is why the lab doesn't do it for you).
+
+**Redirects.** GET and HEAD get **301**; every other method gets **308**, because a 301 lets clients replay a POST as a GET and drop its body. The target is `https://$host:8443$request_uri`: inside the container the TLS port is 443, so `https://$host$request_uri` would send clients to port 443 on your machine, where nothing listens.
+
+```bash
+curl -si localhost:8080/api/users/x?q=1 | grep -iE '^HTTP|location'   # 301 → https://localhost:8443/api/users/x?q=1
+curl -si -X POST -d '{}' localhost:8080/api/orders/ | grep -iE '^HTTP|location' # 308, same method and body
+curl -s localhost:8443/ | grep -o 'The plain HTTP.*port'                # 400 page: "The plain HTTP request was sent to HTTPS port"
+curl -sI https://localhost:8443/api/users/ | head -1                    # HTTP/2 200
+curl -sI --http1.1 https://localhost:8443/api/users/ | head -1          # HTTP/1.1 200
+```
+
+**HSTS.** Every HTTPS answer from a location (pages, API, the JSON error pages) carries `Strict-Transport-Security: max-age=300`; plain HTTP answers don't (browsers ignore it there), and neither do errors nginx returns before choosing a location, such as the 400 below. The max-age is 5 minutes on purpose: a long one would pin `localhost` to HTTPS in your browser for every other local project you run. No `includeSubDomains`, so `admin.localhost` isn't pinned by the main host. Production would use a year and, once sure, preload.
+
+**Protocol settings** (`nginx/snippets/tls.conf`, included by every 443 server with `http2 on;`):
+
+- `ssl_protocols TLSv1.2 TLSv1.3`: a TLS 1.1 client fails the handshake (Go reports `protocol version not supported`, openssl `alert protocol version`).
+- TLS 1.2 ciphers: the ECDHE-RSA AEAD suites of Mozilla's "intermediate" profile; TLS 1.3 chooses its own.
+- `ssl_session_cache shared:SSL:10m`, `ssl_session_timeout 1d`, `ssl_session_tickets off`: resumption comes from the server-side cache, not from tickets whose key would never rotate here. Measured with `openssl s_client -connect localhost:8443 -tls1_2 -reconnect`: 5 of 5 reconnects print `Reused`.
+- No OCSP stapling: a private CA has no OCSP responder.
+
+**What changed for clients.**
+
+- `X-Forwarded-Proto` is now `https`, so backends build https links.
+- The cache key includes `$scheme`, so HTTPS entries are separate.
+- Rate limits are per client IP whatever the protocol. Over HTTP/2 one connection carries every request, and each request still counts: the 12th quick login on one connection is a 429.
+
+**Go clients and HTTP/2.** An `http.Transport` with its own `TLSClientConfig` stays on HTTP/1.1 unless `ForceAttemptHTTP2: true` is set; `http.DefaultTransport` already sets it. HTTP/2 setup also appends `h2` to the `tls.Config` it's given, so give each transport its own `Clone()`, or an HTTP/1.1-only transport sharing it will offer h2 it can't speak.
+
+Not in this phase: HTTP/3/QUIC (nginx has the module, but neither the host curl nor the Go standard library can check it), mTLS to the services, and automatic trust-store installation.
+
 ## Roadmap
 
 | Phase | Topic | Status |
@@ -329,8 +371,8 @@ Measured with product-service slowed to 300ms (`DELAY_MS=300`), ten GETs of one 
 | 3 | Load balancing & failover | ☑ |
 | 4 | Observability: logs, request ID, metrics | ☑ |
 | 5 | Rate limiting & protection | ☑ |
-| 6 | Caching | ◐ |
-| 7 | TLS & HTTP/2 | ☐ |
+| 6 | Caching | ☑ |
+| 7 | TLS & HTTP/2 | ◐ |
 | 8 | Auth at the gateway & CORS | ☐ |
 | 9 | Realtime & gRPC: WebSocket, SSE, gRPC proxy | ☐ |
 | 10 | Performance tuning & zero-downtime | ☐ |

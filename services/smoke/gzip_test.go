@@ -13,7 +13,7 @@ import (
 
 // rawClient keeps Go from asking for gzip and unpacking it, so the test sees
 // exactly what the gateway sent.
-var rawClient = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableCompression: true}}
+var rawClient = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableCompression: true, TLSClientConfig: labTLS.Clone()}}
 
 func encodingOf(t *testing.T, path, acceptEncoding string) http.Header {
 	t.Helper()
