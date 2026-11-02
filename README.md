@@ -229,6 +229,50 @@ Reading: 0 Writing: 1 Waiting: 1
 ```
 A Prometheus exporter and Grafana are not part of the lab. To add them, run `nginx/nginx-prometheus-exporter` in compose with `--nginx.scrape-uri` pointing at a status listener it can reach.
 
+## Rate limiting
+
+| Limit | Applies to | Keyed by | Rate | Burst |
+|---|---|---|---|---|
+| login | `= /api/users/login` (and `…/login/`) | client IP | 5 r/s | `burst=10 nodelay` |
+| api | `/api/users/`, `/api/orders/`, `/api/products/` (one shared bucket) | a known `X-API-Key`, otherwise client IP | 50 r/s | `burst=100 nodelay` |
+
+Over the limit, the client gets `429 {"error":"too many requests","status":429,"route":"…"}` with `Retry-After: 1`, `X-Route` and `X-Request-ID`. The request never reaches a service. The access log records `"limit_req":"REJECTED"` (`PASSED` normally, `-` where no limit applies).
+
+**A spike against `burst=10 nodelay`** (5 r/s):
+- **Requests 1–11:** the 1st request plus 10 burst slots are answered at once.
+- **The 11th** is the last burst slot.
+- **The 12th** (and the rest) gets 429, because the bucket is full.
+- **Refill:** the bucket frees one slot every 200ms, so 1s later 5 more are allowed.
+
+Measured: 50 parallel logins → 11 × 200, 39 × 429.
+
+**Without `nodelay`,** the same 11 are accepted but *queued*. They are released one every 200ms, so the 11th waits ~2s; the 12th still gets 429. `delay=N` mixes the two: the first N pass at once, the rest of the burst is queued.
+
+**Dry run:** `limit_req_dry_run on;` lets everything through, and logs `REJECTED_DRY_RUN` for what would have been rejected. Use it to try a limit on real traffic first. Measured: 50 × 200, with 38–39 would-be rejections (one slot can refill while the spike arrives).
+
+**Keys:**
+- **Known keys** (`lab-key-alpha`, `lab-key-beta`, in `nginx.conf`) get their own budget.
+- **Any other `X-API-Key` value** counts against the sender's IP. So inventing a new key per request buys nothing, and can't fill the zone's memory.
+- **Lab only:** these keys live in a config file in this repo, so anyone who reads it can send them and get a second budget. Everyone using one key also shares that key's bucket. Phase 8 replaces them with real auth.
+
+**Allowlist:** `127.0.0.0/8` and Docker's compose networks `172.16.0.0/12` are never limited.
+- **Read from the TCP peer:** `X-Forwarded-For` or `X-Real-IP` can't claim it.
+- **Your machine stays limited:** it arrives as `192.168.65.1` (Docker Desktop), so you can watch the limits from your shell.
+- **Lab only:** `172.16.0.0/12` is a broad range. On native Linux Docker the host itself is `172.17.0.1`, so your shell would be exempt there and the limit tests would see no 429s. Some real networks use this range too. Docker can also hand out `10.x` or `192.168.x` compose subnets, and IPv6 (`::1`) isn't listed. Narrow it to your actual compose subnet anywhere real.
+
+**What is not limited:**
+- **The gateway's own answers:** `/health`, the SPA, static files, `admin.localhost` and `stub_status`.
+- **Locations answered by `return`:** `limit_req` runs after nginx's rewrite phase, where `return` already answered. Measured: a `return` location with `limit_req` passed 50/50.
+
+**Slow clients:** `client_header_timeout 5s` cuts off a client that stops sending its headers (no response is sent); `client_body_timeout 10s` does the same for a stalled body. The defaults are 60s.
+
+**One gateway, one counter:** the zones live in this nginx's shared memory. Three gateways would each allow the full rate. Consistent limits across instances need a shared store (Redis), or sticky routing of each client to one gateway.
+
+```bash
+seq 1 50 | xargs -P50 -I{} curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/api/users/login | sort | uniq -c
+curl -si localhost:8080/api/users/login | grep -iE 'HTTP|retry-after'
+```
+
 ## Roadmap
 
 | Phase | Topic | Status |
@@ -237,8 +281,8 @@ A Prometheus exporter and Grafana are not part of the lab. To add them, run `ngi
 | 1 | Static files & routing | ☑ |
 | 2 | Reverse proxy deep dive: headers, timeouts, buffering | ☑ |
 | 3 | Load balancing & failover | ☑ |
-| 4 | Observability: logs, request ID, metrics | ◐ |
-| 5 | Rate limiting & protection | ☐ |
+| 4 | Observability: logs, request ID, metrics | ☑ |
+| 5 | Rate limiting & protection | ◐ |
 | 6 | Caching | ☐ |
 | 7 | TLS & HTTP/2 | ☐ |
 | 8 | Auth at the gateway & CORS | ☐ |

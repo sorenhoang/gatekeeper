@@ -13,7 +13,10 @@ import (
 	"time"
 )
 
-const scaleWithin = 5 * time.Second
+const (
+	scaleWithin = 5 * time.Second
+	streamPace  = 25 * time.Millisecond
+)
 
 func scaleOrders3(t *testing.T, n string) {
 	t.Helper()
@@ -78,6 +81,9 @@ func TestShouldDropAScaledDownReplicaWithoutFailingRequests(t *testing.T) {
 			if err == nil {
 				resp.Body.Close()
 			}
+			// ~40 r/s: under Phase 5's 50 r/s per-client API budget, so a
+			// failure here means the scale-down, not the rate limit.
+			time.Sleep(streamPace)
 		}
 	}()
 

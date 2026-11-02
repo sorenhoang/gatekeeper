@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,8 +67,15 @@ func TestShouldNeverDegradeWhileReplicasAreUp(t *testing.T) {
 // reach it (Phase 8 relies on only :8080 being published).
 func TestShouldKeepTheBackupListenerOffTheHost(t *testing.T) {
 	block := upstreamBlock(t, "orders")
-	if !regexp.MustCompile(`server\s+127\.0\.0\.1:8081\s+backup\s*;`).MatchString(block) {
-		t.Fatalf("upstream orders has no `server 127.0.0.1:8081 backup;`:\n%s", block)
+	line := regexp.MustCompile(`server\s+127\.0\.0\.1:8081\s+([^;]*);`).FindStringSubmatch(block)
+	if line == nil || !regexp.MustCompile(`\bbackup\b`).MatchString(line[1]) {
+		t.Fatalf("upstream orders has no `server 127.0.0.1:8081 … backup …;`:\n%s", block)
+	}
+	// The backup answers writes with a deliberate 503; http_503 is in the
+	// retry rules, so without max_fails=0 that 503 would eject the backup for
+	// fail_timeout and later requests would get 502 (seen as a flake).
+	if !strings.Contains(line[1], "max_fails=0") {
+		t.Errorf("backup server line %q lacks max_fails=0", line[0])
 	}
 	if conn, err := net.DialTimeout("tcp", "localhost:8081", time.Second); err == nil {
 		conn.Close()
