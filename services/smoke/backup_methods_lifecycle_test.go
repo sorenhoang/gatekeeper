@@ -36,6 +36,11 @@ func TestShouldNeverAnswerAWriteWithADegraded200(t *testing.T) {
 	}) {
 		t.Fatal("GET never became degraded with every replica stopped")
 	}
+	// One degraded GET doesn't prove every stopped replica's old address is
+	// gone: a write that picks two of them spends both retry tries on connect
+	// timeouts and never reaches the backup. Wait out the resolver window, so
+	// this checks the degraded state, not the stop transition.
+	time.Sleep(reresolveWithin)
 
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		resp, err := requestOrders(t, method)
