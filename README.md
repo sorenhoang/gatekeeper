@@ -273,6 +273,52 @@ seq 1 50 | xargs -P50 -I{} curl -s -o /dev/null -w '%{http_code}\n' localhost:80
 curl -si localhost:8080/api/users/login | grep -iE 'HTTP|retry-after'
 ```
 
+## Caching
+
+The gateway keeps a shared cache for `/api/products/*` only (`nginx/snippets/cache-products.conf`, zone `api_cache`, 100m on disk under `/var/cache/nginx/api`). Users and orders are never cached: their answers are per-user or change on every write.
+
+| Rule | Setting | What you see |
+|---|---|---|
+| A 200 is kept for 30s | `proxy_cache_valid 200 30s` (products location) | first GET `X-Cache-Status: MISS`, repeats `HIT` |
+| Key | `$scheme$host$request_uri` | the client's Host is part of the key, so one request with `Host: evil.example` can't plant a body every other client then gets |
+| Credentials skip the cache | `proxy_cache_bypass` + `proxy_no_cache` on `Authorization`, `Proxy-Authorization`, `Cookie`, `X-API-Key` | `BYPASS` every time, and nothing is stored |
+| A response that sets a cookie is never stored | nginx's default for `Set-Cookie` | `MISS` every time |
+| Only GET/HEAD | nginx's default `proxy_cache_methods` | a POST is never a `HIT` |
+| Stampede lock | `proxy_cache_lock on`, `proxy_cache_lock_timeout 5s` | 50 concurrent GETs of a cold key reach a slow service once |
+| Stale on failure | `proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504`, `proxy_cache_background_update on` | with product-service down, a key cached earlier is answered `STALE` (200); one never cached is the JSON 502 |
+
+`X-Cache-Status` is `MISS`, `HIT`, `EXPIRED`, `STALE`, `UPDATING` or `BYPASS`; the access log has the same value in its `cache` field (empty for routes that aren't cached).
+
+```bash
+curl -si localhost:8080/api/products/demo | grep -i x-cache   # MISS
+curl -si localhost:8080/api/products/demo | grep -i x-cache   # HIT
+curl -si -H 'Authorization: Bearer x' localhost:8080/api/products/demo | grep -i x-cache   # BYPASS
+```
+
+Things to know:
+
+- The credential list is an allowlist. A backend that reads some other auth header (`X-Auth-Token`, `X-Access-Token`, `Api-Key`, …) needs it added to the `$cache_skip` map in `nginx.conf`, or its personal answers would be shared.
+- A HIT is the first requester's answer. The echo body of a HIT still shows that request's `X-Request-Id`, `X-Real-IP` and `User-Agent` (the response header `X-Request-ID` is fresh). That's harmless for a catalogue but is why anything per-user must not be cached.
+- Rate limiting runs before the cache: a HIT still counts against the Phase 5 API budget (50 r/s per client), and a 429 has no `X-Cache-Status`.
+- The lock waits at most 5s, the same as products' read timeout: if the service hangs, waiters then go to it themselves, so a hung service still sees a stampede.
+- The stampede lock only matters when the service is slow: with a fast service, concurrent misses finish before the lock adds anything.
+
+### gzip
+
+`gzip on` for `application/json`, `text/css` and `application/javascript` from 256 bytes (`gzip_min_length 256`), with `gzip_vary on`. A client sending `Accept-Encoding: gzip` gets `Content-Encoding: gzip` and `Vary: Accept-Encoding`; one that doesn't gets plain bytes. `/health` (33 bytes) is never compressed: it would grow.
+
+The cache stores the service's uncompressed body and nginx gzips each answer on the way out, so one entry serves both kinds of client. That relies on the services never gzipping themselves: a backend that did would have its gzip body handed to clients that didn't ask for it, because `Accept-Encoding` is not part of the key.
+
+### Before and after
+
+Measured with product-service slowed to 300ms (`DELAY_MS=300`), ten GETs of one products URL. "Before" sends an `Authorization` header so every GET bypasses the cache (`TestShouldPayTheServiceDelayOnEveryGetWithoutTheCache`); "after" is plain GETs (`TestShouldAnswerRepeatsFromTheCacheWithoutTheServiceDelay`):
+
+| | Latency | Backend hits |
+|---|---|---|
+| before (cache bypassed: every GET) | 303–310ms each | 10 |
+| after (first GET, `MISS`) | 309ms | 1 |
+| after (GETs 2–10, `HIT`) | 0.2–0.5ms | 0 |
+
 ## Roadmap
 
 | Phase | Topic | Status |
@@ -282,8 +328,8 @@ curl -si localhost:8080/api/users/login | grep -iE 'HTTP|retry-after'
 | 2 | Reverse proxy deep dive: headers, timeouts, buffering | ☑ |
 | 3 | Load balancing & failover | ☑ |
 | 4 | Observability: logs, request ID, metrics | ☑ |
-| 5 | Rate limiting & protection | ◐ |
-| 6 | Caching | ☐ |
+| 5 | Rate limiting & protection | ☑ |
+| 6 | Caching | ◐ |
 | 7 | TLS & HTTP/2 | ☐ |
 | 8 | Auth at the gateway & CORS | ☐ |
 | 9 | Realtime & gRPC: WebSocket, SSE, gRPC proxy | ☐ |

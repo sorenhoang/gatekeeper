@@ -7,6 +7,7 @@ package smoke
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,6 +130,18 @@ func TestShouldStopWithinTwoSecondsOnSigterm(t *testing.T) {
 	t.Cleanup(func() {
 		mustCompose(t, "start", svc)
 		waitHealthy(t, svc)
+		// Healthy is not enough: nginx may still hold the server as failed
+		// (max_fails=1, fail_timeout=10s), so the next test would get a 502.
+		client := &http.Client{Timeout: time.Second}
+		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+			if resp, err := client.Get(gatewayURL + "/api/users/"); err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return
+				}
+			}
+		}
+		t.Errorf("gateway did not reach %s again within 15s of restarting it", svc)
 	})
 
 	start := time.Now()

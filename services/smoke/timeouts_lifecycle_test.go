@@ -3,6 +3,7 @@
 package smoke
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -77,7 +78,9 @@ func TestShouldLetASlowOrdersBackendFinish(t *testing.T) {
 
 func TestShouldCutOffASlowProductsBackendAtFiveSeconds(t *testing.T) {
 	withServiceEnv(t, "product-service", "DELAY_MS=7000")
-	r := timedGet(t, "/api/products/x")
+	// A fresh URL: products is cached since Phase 6, and a cached (or stale)
+	// copy would answer before the 5s timeout could fire.
+	r := timedGet(t, fmt.Sprintf("/api/products/slow-%d", time.Now().UnixNano()))
 	if r.status != http.StatusGatewayTimeout {
 		t.Errorf("slow products: status %d, want 504\n%s", r.status, r.body)
 	}

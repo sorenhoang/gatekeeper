@@ -3,6 +3,7 @@
 package smoke
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -19,6 +20,7 @@ func restoreStack(t *testing.T) {
 			t.Errorf("restoring the stack with make up: %v\n%s", err, out)
 			return
 		}
+		clearChaos(t)
 		waitGatewayServing(t)
 	})
 }
@@ -61,4 +63,39 @@ func TestShouldMakeDownRemoveAllContainersAndMakeUpStartAllFive(t *testing.T) {
 		}
 	}
 	waitGatewayServing(t)
+}
+
+// clearChaos recreates any service still carrying a DELAY_MS/FAIL_RATE value.
+// `make up` normally does this, but a slowed service once survived it in the
+// full suite and broke the next test; this makes the restore certain.
+func clearChaos(t *testing.T) {
+	t.Helper()
+	ids := strings.Fields(mustCompose(t, "ps", "-q"))
+	var dirty []string
+	for _, id := range ids {
+		out, err := exec.Command("docker", "inspect", "--format",
+			`{{index .Config.Labels "com.docker.compose.service"}} {{join .Config.Env " "}}`, id).Output()
+		if err != nil {
+			t.Errorf("docker inspect %s: %v", id, err)
+			continue
+		}
+		f := strings.Fields(string(out))
+		if len(f) < 2 {
+			continue
+		}
+		for _, kv := range f[1:] {
+			if strings.HasPrefix(kv, "DELAY_MS=") || strings.HasPrefix(kv, "FAIL_RATE=") {
+				dirty = append(dirty, f[0])
+				break
+			}
+		}
+	}
+	if len(dirty) == 0 {
+		return
+	}
+	t.Logf("clearing leftover chaos env from %v", dirty)
+	mustCompose(t, append([]string{"up", "-d", "--no-deps", "--force-recreate", "--wait"}, dirty...)...)
+	if out, err := nginxCmd(t, "-s", "reload"); err != nil {
+		t.Errorf("reload after clearing chaos: %v\n%s", err, out)
+	}
 }

@@ -24,7 +24,9 @@ type headerEcho struct {
 // the backend says it received.
 func backendHeaders(t *testing.T, path string, extra map[string]string) headerEcho {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, gatewayURL+path, nil)
+	// A fresh path per call: products is cached since Phase 6, and a cached
+	// body would show the headers of an earlier request, not this one.
+	req, err := http.NewRequest(http.MethodGet, gatewayURL+path+runID("hdr"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
