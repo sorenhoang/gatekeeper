@@ -20,7 +20,9 @@ func TestShouldFindTheSlowServiceFromGatewayLogFieldsAlone(t *testing.T) {
 	for _, route := range []string{"users", "products"} {
 		for i := 0; i < 5; i++ {
 			id := runID("slow-" + route)
-			r := withIDsPatient(t, "/api/"+route+"/x", id)
+			// The id in the path makes each request a new cache key (products
+			// is cached since Phase 6), so every one is timed at the service.
+			r := withIDsPatient(t, "/api/"+route+"/"+id, id)
 			if r != http.StatusOK {
 				t.Fatalf("GET /api/%s/x = %d, want 200", route, r)
 			}

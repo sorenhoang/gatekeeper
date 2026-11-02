@@ -73,7 +73,12 @@ func TestShouldDropAScaledDownReplicaWithoutFailingRequests(t *testing.T) {
 				return
 			default:
 			}
-			resp, err := client.Get(gatewayURL + "/api/orders/")
+			// A known API key gives the stream its own 50 r/s budget: the
+			// hostname poller below sends fast batches from the same IP, and
+			// together they would exceed the IP's budget (seen as 429s).
+			req, _ := http.NewRequest(http.MethodGet, gatewayURL+"/api/orders/", nil)
+			req.Header.Set("X-API-Key", "lab-key-alpha")
+			resp, err := client.Do(req)
 			sent.Add(1)
 			if err != nil || resp.StatusCode != http.StatusOK {
 				failed.Add(1)

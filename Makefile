@@ -57,5 +57,6 @@ test:
 	cd services && go test -count=1 -tags smoke ./smoke/
 
 # Also stops the gateway and runs down/up; restores the stack when done.
+# Takes ~10 min, past go test's default 10m timeout.
 test-lifecycle:
-	cd services && go test -count=1 -tags smoke,lifecycle ./smoke/
+	cd services && go test -count=1 -timeout 30m -tags smoke,lifecycle ./smoke/
