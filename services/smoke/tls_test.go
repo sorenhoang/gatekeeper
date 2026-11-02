@@ -42,7 +42,7 @@ func tlsClient(t *testing.T, h1 bool, cfg func(*tls.Config)) *http.Client {
 	if h1 {
 		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	}
-	return &http.Client{Timeout: 10 * time.Second, Transport: tr,
+	return &http.Client{Timeout: 10 * time.Second, Transport: labAuth{next: tr},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 

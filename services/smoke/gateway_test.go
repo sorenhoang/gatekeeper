@@ -42,6 +42,7 @@ var labTLS = func() *tls.Config {
 // one would make HTTP/1.1-only transports offer h2 they can't speak.
 func init() {
 	http.DefaultTransport.(*http.Transport).TLSClientConfig = labTLS.Clone()
+	http.DefaultTransport = labAuth{next: http.DefaultTransport}
 }
 
 func get(t *testing.T, path, host string) (*http.Response, string) {

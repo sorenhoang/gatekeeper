@@ -9,8 +9,8 @@ import "testing"
 func TestShouldLimitTheTrailingSlashLoginLikeTheLogin(t *testing.T) {
 	afterDrain(t)
 	hits := spike(t, 50, "", loginPath+"/", nil)
-	if c := countStatus(hits); c[200] != 11 || c[429] != 39 {
-		t.Fatalf("50 parallel %s/ → %v, want 11 × 200 and 39 × 429 like %s", loginPath, c, loginPath)
+	if c := countStatus(hits); c[405] != 11 || c[429] != 39 {
+		t.Fatalf("50 parallel %s/ → %v, want 11 × 405 and 39 × 429 like %s", loginPath, c, loginPath)
 	}
 	for _, h := range hits {
 		if h.status == 429 {

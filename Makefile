@@ -8,25 +8,33 @@ API_ROUTES  := users orders products
 # 50 x 0.2s: how long `make up` waits for each route before only warning.
 READY_TRIES := 50
 
-.PHONY: certs up down reload logs status trace test test-lifecycle
+.PHONY: certs secrets up down reload logs status trace test test-lifecycle
 
 # Lab CA + gateway certificate in certs/ (gitignored); keeps valid files,
 # reissues a leaf that expires within 30 days. CERTS_DIR overrides the folder.
 certs:
 	@./scripts/certs.sh
 
+# Signing key, lab users and the admin htpasswd in secrets/ (gitignored);
+# keeps existing files. SECRETS_DIR overrides the folder.
+secrets:
+	@./scripts/secrets.sh
+
 # A smoke run killed mid-test can leave a broken zz-smoke-*.conf behind, which
 # would stop the gateway from starting.
-up: certs
+up: certs secrets
 	rm -f nginx/conf.d/zz-smoke-*.conf
 	docker compose up -d --build --wait
 	@# A reload re-resolves the upstreams now (measured: 0.2s vs ~3s for a
 	@# service that was missing); then wait for each route. A route that stays
 	@# down only warns: a stopped service is a valid state, not a failed `up`.
+	@# Any answer but 000/502/503/504 counts: users and orders say 401 without
+	@# a token, which still proves the route is up.
 	$(NGINX) -s reload
 	@for route in $(API_ROUTES); do \
 		for i in $$(seq $(READY_TRIES)); do \
-			curl -fs -o /dev/null --cacert certs/ca.pem https://localhost:8443/api/$$route/ && break; \
+			code=$$(curl -s -o /dev/null -w '%{http_code}' --cacert certs/ca.pem https://localhost:8443/api/$$route/); \
+			case $$code in 000|502|503|504) ;; *) break ;; esac; \
 			[ $$i -eq $(READY_TRIES) ] && echo "warning: /api/$$route/ not answering yet" >&2; \
 			sleep 0.2; \
 		done; \

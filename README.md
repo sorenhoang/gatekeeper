@@ -37,6 +37,7 @@ gatekeeper/
 ├── docker-compose.yml
 ├── Makefile                 # certs, up, down, reload, test, logs
 ├── scripts/certs.sh         # lab CA + gateway certificate (make certs)
+├── scripts/secrets.sh       # signing key, lab users, admin htpasswd (make secrets)
 ├── nginx/                   # mounted at /etc/nginx/gatekeeper (nginx -c .../nginx.conf)
 │   ├── nginx.conf           # main context: workers, events, http
 │   ├── conf.d/              # one file per virtual server
@@ -60,10 +61,16 @@ gatekeeper/
 
 ## Getting started
 
-Requires Docker (with Compose) and Go 1.23+. Only the gateway is published: HTTPS on `localhost:8443` (the app) and plain HTTP on `localhost:8080` (redirects to HTTPS, plus `/health`); the services are reachable only inside the compose network. `make up` creates the lab certificates on first run (`certs/`, never committed); point curl at the lab CA once per shell with `export CURL_CA_BUNDLE=$PWD/certs/ca.pem` and the examples below work as written (checked with macOS curl 8.7; if your curl ignores the variable, add `--cacert certs/ca.pem`).
+Requires Docker (with Compose) and Go 1.23+. Only the gateway is published: HTTPS on `localhost:8443` (the app) and plain HTTP on `localhost:8080` (redirects to HTTPS, plus `/health`); the services are reachable only inside the compose network. `make up` creates the lab certificates on first run (`certs/`, never committed); point curl at the lab CA once per shell with `export CURL_CA_BUNDLE=$PWD/certs/ca.pem` and the examples below work as written (checked with macOS curl 8.7; if your curl ignores the variable, add `--cacert certs/ca.pem`). Since Phase 8 users and orders need a token; get one for the lab user alice once per shell and the examples below send it:
+
+```bash
+export TOKEN=$(jq -c '{username:"alice",password:.alice.password}' secrets/auth/users.json |
+  curl -s -X POST -H 'Content-Type: application/json' -d @- https://localhost:8443/api/auth/login | jq -r .token)   # valid 15 min
+```
 
 ```bash
 make certs     # lab CA + gateway certificate in certs/ (make up runs it)
+make secrets   # signing key, lab users, admin password in secrets/ (make up runs it)
 make up        # build and start everything
 make test      # smoke test the stack (needs `make up` first; briefly restarts user-service only)
 make test-lifecycle  # make test + the tests that stop/recreate the stack
@@ -87,6 +94,8 @@ How Nginx picks a location: an exact `=` match wins at once. Otherwise it rememb
 
 | Host | URL | Winning location (X-Route) | Answered by |
 |---|---|---|---|
+| localhost:8443 | /api/auth/login | `login` — `= /api/auth/login` | auth-service `/login` (POST; a GET gets 405) |
+| localhost:8443 | /api/users/login | `login` — `= /api/users/login` (moved) | nginx: 308 to `/api/auth/login` |
 | localhost:8443 | /api/users/42 | `users` — `^~ /api/users/` | user-service, sees `/42` |
 | localhost:8443 | /api/users/ | `users` — `^~ /api/users/` | user-service, sees `/` |
 | localhost:8443 | /api/users | `users` — `^~ /api/users/` (needs the slash) | nginx: 301 to `/api/users/` (automatic for a `proxy_pass` prefix ending in `/`) |
@@ -109,7 +118,7 @@ How Nginx picks a location: an exact `=` match wins at once. Otherwise it rememb
 
 Every proxied location includes `nginx/snippets/proxy-headers.conf`; no `proxy_set_header` lives anywhere else, because one in a location would drop all the inherited ones.
 
-What a backend receives (`curl -s https://localhost:8443/api/users/ | jq '.host, .headers'`):
+What a backend receives (`curl -s -H "Authorization: Bearer $TOKEN" https://localhost:8443/api/users/ | jq '.host, .headers'`):
 
 | Header | Value | Why |
 |---|---|---|
@@ -129,17 +138,17 @@ Read the gateway error log (`docker compose logs gateway | grep error`). Each ro
 
 | Cause | Status | Error-log phrase | How to reproduce |
 |---|---|---|---|
-| No address: the service's container is gone, so Docker DNS has no answer | 502 | `no live upstreams` | `docker compose stop user-service`, wait 3s, then `curl -i https://localhost:8443/api/users/` |
+| No address: the service's container is gone, so Docker DNS has no answer | 502 | `no live upstreams` | `docker compose stop user-service`, wait 3s, then `curl -i -H "Authorization: Bearer $TOKEN" https://localhost:8443/api/users/` |
 | Stale address: the IP nginx holds belongs to no container (the first ~2s after a stop, before nginx re-resolves) | 504 | `upstream timed out (110: Operation timed out) while connecting to upstream` | `docker compose stop user-service` and `curl` straight away (a race with the 2s re-resolve; the smoke test proxies to an unused IP to get it every time). Nothing refuses the connect, so it waits out `proxy_connect_timeout` (1s) |
 | Connection refused: the container is up but nothing listens on that port | 502 | `connect() failed (111: Connection refused)` | point a `proxy_pass` at `user-service:9999` and reload |
-| Timed out: the backend accepted the request but stayed silent past `proxy_read_timeout` | 504 | `upstream timed out (110: Operation timed out) while reading response header from upstream` | `DELAY_MS=3000 docker compose up -d user-service`, then `curl -i https://localhost:8443/api/users/x` |
+| Timed out: the backend accepted the request but stayed silent past `proxy_read_timeout` | 504 | `upstream timed out (110: Operation timed out) while reading response header from upstream` | `DELAY_MS=3000 docker compose up -d user-service`, then `curl -i -H "Authorization: Bearer $TOKEN" https://localhost:8443/api/users/x` |
 
 ## Load balancing
 
 Orders runs as three named replicas (`order-service`, `order-service-2`, `order-service-3`), one `server … resolve` line each in `upstream orders`. They run the same binary: the echo's `service` is always `order-service`, and `hostname` (the container id) tells them apart.
 
 ```bash
-for i in $(seq 1 12); do curl -s https://localhost:8443/api/orders/ | jq -r .hostname; done | sort | uniq -c
+for i in $(seq 1 12); do curl -s -H "Authorization: Bearer $TOKEN" https://localhost:8443/api/orders/ | jq -r .hostname; done | sort | uniq -c
 DELAY_MS=800 docker compose up -d order-service-2     # make one replica slow
 ```
 
@@ -184,7 +193,7 @@ docker compose up -d --no-deps --scale order-service-3=1 order-service-3   # bac
 - **Anything else is replaced** with nginx's 32-hex `$request_id`: spaces, `=`, over 64 chars, or two headers. Such a value could forge fields in the services' space-separated `key=value` logs.
 
 ```bash
-curl -si -H 'X-Request-ID: my-trace-1' https://localhost:8443/api/users/ | grep -i x-request-id
+curl -si -H 'X-Request-ID: my-trace-1' -H "Authorization: Bearer $TOKEN" https://localhost:8443/api/users/ | grep -i x-request-id
 make trace ID=my-trace-1      # its gateway line and its service line
 ```
 
@@ -235,7 +244,7 @@ A Prometheus exporter and Grafana are not part of the lab. To add them, run `ngi
 
 | Limit | Applies to | Keyed by | Rate | Burst |
 |---|---|---|---|---|
-| login | `= /api/users/login` (and `…/login/`) | client IP | 5 r/s | `burst=10 nodelay` |
+| login | `= /api/auth/login` (and `…/login/`; the old `/api/users/login` paths 308 there) | client IP | 5 r/s | `burst=10 nodelay` |
 | api | `/api/users/`, `/api/orders/`, `/api/products/` (one shared bucket) | a known `X-API-Key`, otherwise client IP | 50 r/s | `burst=100 nodelay` |
 
 Over the limit, the client gets `429 {"error":"too many requests","status":429,"route":"…"}` with `Retry-After: 1`, `X-Route` and `X-Request-ID`. The request never reaches a service. The access log records `"limit_req":"REJECTED"` (`PASSED` normally, `-` where no limit applies).
@@ -255,7 +264,7 @@ Measured: 50 parallel logins → 11 × 200, 39 × 429.
 **Keys:**
 - **Known keys** (`lab-key-alpha`, `lab-key-beta`, in `nginx.conf`) get their own budget.
 - **Any other `X-API-Key` value** counts against the sender's IP. So inventing a new key per request buys nothing, and can't fill the zone's memory.
-- **Lab only:** these keys live in a config file in this repo, so anyone who reads it can send them and get a second budget. Everyone using one key also shares that key's bucket. Phase 8 replaces them with real auth.
+- **Lab only:** these keys live in a config file in this repo, so anyone who reads it can send them and get a second budget. Everyone using one key also shares that key's bucket. They stay after Phase 8: a per-user budget would need the identity before `limit_req` runs (see Auth & CORS).
 
 **Allowlist:** `127.0.0.0/8` and Docker's compose networks `172.16.0.0/12` are never limited.
 - **Read from the TCP peer:** `X-Forwarded-For` or `X-Real-IP` can't claim it.
@@ -264,6 +273,7 @@ Measured: 50 parallel logins → 11 × 200, 39 × 429.
 
 **What is not limited:**
 - **The gateway's own answers:** `/health`, the SPA, static files, `admin.localhost` and `stub_status`.
+- **CORS preflights:** the API locations answer them with `return 204` (Auth & CORS).
 - **Locations answered by `return`:** `limit_req` runs after nginx's rewrite phase, where `return` already answered. Measured: a `return` location with `limit_req` passed 50/50.
 
 **Slow clients:** `client_header_timeout 5s` cuts off a client that stops sending its headers (no response is sent); `client_body_timeout 10s` does the same for a stalled body. The defaults are 60s.
@@ -271,8 +281,8 @@ Measured: 50 parallel logins → 11 × 200, 39 × 429.
 **One gateway, one counter:** the zones live in this nginx's shared memory. Three gateways would each allow the full rate. Consistent limits across instances need a shared store (Redis), or sticky routing of each client to one gateway.
 
 ```bash
-seq 1 50 | xargs -P50 -I{} curl -s -o /dev/null -w '%{http_code}\n' https://localhost:8443/api/users/login | sort | uniq -c
-curl -si https://localhost:8443/api/users/login | grep -iE 'HTTP|retry-after'
+seq 1 50 | xargs -P50 -I{} curl -s -o /dev/null -w '%{http_code}\n' https://localhost:8443/api/auth/login | sort | uniq -c   # 11 × 405 (GET), 39 × 429
+curl -si https://localhost:8443/api/auth/login | grep -iE 'HTTP|retry-after'
 ```
 
 ## Caching
@@ -338,8 +348,8 @@ TLS ends at the gateway; the services stay plain HTTP/1.1 inside the compose net
 curl -si localhost:8080/api/users/x?q=1 | grep -iE '^HTTP|location'   # 301 → https://localhost:8443/api/users/x?q=1
 curl -si -X POST -d '{}' localhost:8080/api/orders/ | grep -iE '^HTTP|location' # 308, same method and body
 curl -s localhost:8443/ | grep -o 'The plain HTTP.*port'                # 400 page: "The plain HTTP request was sent to HTTPS port"
-curl -sI https://localhost:8443/api/users/ | head -1                    # HTTP/2 200
-curl -sI --http1.1 https://localhost:8443/api/users/ | head -1          # HTTP/1.1 200
+curl -sI -H "Authorization: Bearer $TOKEN" https://localhost:8443/api/users/ | head -1   # HTTP/2 200
+curl -sI --http1.1 -H "Authorization: Bearer $TOKEN" https://localhost:8443/api/users/ | head -1   # HTTP/1.1 200
 ```
 
 **HSTS.** Every HTTPS answer from a location (pages, API, the JSON error pages) carries `Strict-Transport-Security: max-age=300`; plain HTTP answers don't (browsers ignore it there), and neither do errors nginx returns before choosing a location, such as the 400 below. The max-age is 5 minutes on purpose: a long one would pin `localhost` to HTTPS in your browser for every other local project you run. No `includeSubDomains`, so `admin.localhost` isn't pinned by the main host. Production would use a year and, once sure, preload.
@@ -361,6 +371,56 @@ curl -sI --http1.1 https://localhost:8443/api/users/ | head -1          # HTTP/1
 
 Not in this phase: HTTP/3/QUIC (nginx has the module, but neither the host curl nor the Go standard library can check it), mTLS to the services, and automatic trust-store installation.
 
+## Auth & CORS
+
+The gateway decides who may call what; services trust the identity it passes on and never check tokens themselves.
+
+| Route | Who may call it |
+|---|---|
+| `POST /api/auth/login` | anyone (login zone: 5 r/s, burst 10) |
+| `/api/users/`, `/api/orders/` | a valid token; DELETE on orders needs role `admin` |
+| `/api/products/`, `/health`, static, SPA | anyone (products stays a shared cache) |
+| `admin.localhost` | the admin Basic login (`auth_basic`) |
+
+**Secrets.** `make secrets` (run by `make up`) writes `secrets/auth/jwt.key` (32 random bytes), `secrets/auth/users.json` (lab users `alice`, role `user`, and `admin`, role `admin`, with random passwords) and `secrets/gateway/admin.htpasswd` (apr1, the admin user's password). `secrets/` is gitignored. Each half is mounted only into its own container: the gateway can check the admin password but never holds the signing key. Non-empty files are kept; an empty one is regenerated. Running `docker compose up` without `make secrets` leaves auth-service exiting with "run make secrets".
+
+```bash
+TOKEN=$(jq -c '{username:"alice",password:.alice.password}' secrets/auth/users.json |
+  curl -s -X POST -H 'Content-Type: application/json' -d @- https://localhost:8443/api/auth/login | jq -r .token)
+curl -s https://localhost:8443/api/users/ | jq .                                   # 401 {"error":"unauthorized",…}
+curl -s -H "Authorization: Bearer $TOKEN" https://localhost:8443/api/users/ | jq .headers  # X-User-Id: alice, X-User-Role: user
+curl -s -X DELETE -H "Authorization: Bearer $TOKEN" https://localhost:8443/api/orders/1 | jq .   # 403 forbidden (user role)
+```
+
+**The token flow.**
+
+1. auth-service's `POST /login` returns an HS256 token (`sub`, `role`, `iat`, `exp` = 15 min). It's short because a token can't be revoked before it expires.
+2. Each users/orders request makes nginx run `auth_request /_auth`, an internal subrequest to auth-service's `GET /verify`. The subrequest carries the client's headers but no body, plus `X-Original-Method`.
+3. `/verify` answers 204 with `X-User-ID`/`X-User-Role`, 401 for any bad token (missing, malformed, wrong key, expired, no `exp`, any `alg` but HS256), or 403 when a `user` tries a DELETE.
+4. nginx copies the identity into `X-User-ID`/`X-User-Role` with `auth_request_set` and `proxy_set_header`. Those overwrite whatever the client sent. On public routes they're empty, which drops a client's forged value too.
+
+**Failing closed.** If auth-service is unreachable, `auth_request` answers 500, which `error_page 500 = @auth_unavailable` turns into a JSON **503** `{"error":"auth unavailable",…}`. The `=` matters: without it the client would still see 500. Protected routes stop; public ones keep working.
+
+**The verdict cache.** Asking `/verify` on every call costs a hop, so nginx caches a 204 for **10s**, keyed by token + method. Five calls with one token make one `/verify`. A 401 or 403 is never cached. The trade-off: a token stays accepted up to 10s past its `exp`. The cache key holds the token, so the cache files are secrets too.
+
+**Order inside nginx.** `limit_req` runs in the preaccess phase, `auth_request` in access. A rate limit therefore can't be keyed on the verified user: the identity doesn't exist yet. Per-user limits would need the token checked earlier, in njs (`js_set`), which means putting the signing key in the gateway. That's why the Phase 5 API-key buckets stay as they are.
+
+**Admin host.** `admin.localhost` has `auth_basic` with the generated htpasswd; a browser shows its login prompt (`WWW-Authenticate: Basic`). Its location serves files with `try_files`. A location that answers with `return` would skip the check, because `return` runs before the access phase.
+
+**CORS.** Browsers on `https://app.localhost:8443` and `http://localhost:5173` (a typical dev server) may call the API; every other origin, `null` and look-alikes such as a trailing slash included, gets no `Access-Control-*` header at all, so its browser blocks the answer. A plain `OPTIONS` without `Access-Control-Request-Method` is not a preflight and goes through auth.
+
+- **Preflight:** an `OPTIONS` with `Access-Control-Request-Method` is answered **204** by `return` in the five API locations (both login spellings, users, orders, products), before the rate limit and auth, since browsers send preflights without a token. It carries `Access-Control-Allow-Origin` (the caller's origin), `Allow-Methods: GET, POST, DELETE, OPTIONS`, `Allow-Headers: Authorization, Content-Type, X-Request-ID` and `Max-Age: 600`. The trade-off is that preflights are never rate-limited.
+- **Real answers:** these carry `Access-Control-Allow-Origin`, `Access-Control-Expose-Headers: X-Request-ID` and `Vary: Origin`, and so do the JSON 401/403/429/502 pages. Without that, a browser would hide the real error from the app.
+- **No `Access-Control-Allow-Credentials`:** tokens travel in `Authorization`, not cookies.
+- **Cached products answers:** these get each requesting origin's own header, because `add_header` runs when the answer is served.
+
+```bash
+curl -si -X OPTIONS -H 'Origin: http://localhost:5173' -H 'Access-Control-Request-Method: DELETE' \
+  https://localhost:8443/api/orders/ | grep -i '^HTTP\|access-control'
+```
+
+**Login moved.** The login route is `POST /api/auth/login` (auth-service); the Phase 5 paths `/api/users/login` and `/api/users/login/` answer 308 there.
+
 ## Roadmap
 
 | Phase | Topic | Status |
@@ -372,8 +432,8 @@ Not in this phase: HTTP/3/QUIC (nginx has the module, but neither the host curl 
 | 4 | Observability: logs, request ID, metrics | ☑ |
 | 5 | Rate limiting & protection | ☑ |
 | 6 | Caching | ☑ |
-| 7 | TLS & HTTP/2 | ◐ |
-| 8 | Auth at the gateway & CORS | ☐ |
+| 7 | TLS & HTTP/2 | ☑ |
+| 8 | Auth at the gateway & CORS | ◐ |
 | 9 | Realtime & gRPC: WebSocket, SSE, gRPC proxy | ☐ |
 | 10 | Performance tuning & zero-downtime | ☐ |
 | 11 | Stretch: njs, Kubernetes Ingress, Nginx vs Envoy | ☐ |

@@ -107,7 +107,7 @@ func TestShouldMarkFinishedPhasesDoneAndTheCurrentOneInProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := map[string]string{"| 0 |": "☑", "| 1 |": "☑", "| 2 |": "☑", "| 3 |": "☑", "| 4 |": "☑", "| 5 |": "☑", "| 6 |": "☑", "| 7 |": "◐"}
+	status := map[string]string{"| 0 |": "☑", "| 1 |": "☑", "| 2 |": "☑", "| 3 |": "☑", "| 4 |": "☑", "| 5 |": "☑", "| 6 |": "☑", "| 7 |": "☑", "| 8 |": "◐"}
 	for _, line := range strings.Split(string(b), "\n") {
 		for prefix, mark := range status {
 			if strings.HasPrefix(line, prefix) {
