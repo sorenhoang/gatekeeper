@@ -25,7 +25,7 @@ The services are intentionally simple. The point of this project is the gateway:
 | Part | Choice |
 |---|---|
 | Gateway | Nginx (open source, official Docker image) |
-| Services | Go (standard library `net/http`; WebSocket and gRPC libraries only from Phase 9) |
+| Services | Go 1.26 (standard library `net/http`; since Phase 9 `github.com/coder/websocket` and `google.golang.org/grpc` for realtime-service) |
 | Orchestration | Docker Compose |
 | Load testing | k6, `wrk`, `curl` |
 | TLS (local) | openssl (mkcert optional) |
@@ -61,7 +61,7 @@ gatekeeper/
 
 ## Getting started
 
-Requires Docker (with Compose) and Go 1.23+. Only the gateway is published: HTTPS on `localhost:8443` (the app) and plain HTTP on `localhost:8080` (redirects to HTTPS, plus `/health`); the services are reachable only inside the compose network. `make up` creates the lab certificates on first run (`certs/`, never committed); point curl at the lab CA once per shell with `export CURL_CA_BUNDLE=$PWD/certs/ca.pem` and the examples below work as written (checked with macOS curl 8.7; if your curl ignores the variable, add `--cacert certs/ca.pem`). Since Phase 8 users and orders need a token; get one for the lab user alice once per shell and the examples below send it:
+Requires Docker (with Compose) and Go 1.26+ (grpc-go needs it). Only the gateway is published: HTTPS on `localhost:8443` (the app) and plain HTTP on `localhost:8080` (redirects to HTTPS, plus `/health`); the services are reachable only inside the compose network. `make up` creates the lab certificates on first run (`certs/`, never committed); point curl at the lab CA once per shell with `export CURL_CA_BUNDLE=$PWD/certs/ca.pem` and the examples below work as written (checked with macOS curl 8.7; if your curl ignores the variable, add `--cacert certs/ca.pem`). Since Phase 8 users and orders need a token; get one for the lab user alice once per shell and the examples below send it:
 
 ```bash
 export TOKEN=$(jq -c '{username:"alice",password:.alice.password}' secrets/auth/users.json |
@@ -101,6 +101,8 @@ How Nginx picks a location: an exact `=` match wins at once. Otherwise it rememb
 | localhost:8443 | /api/users | `users` — `^~ /api/users/` (needs the slash) | nginx: 301 to `/api/users/` (automatic for a `proxy_pass` prefix ending in `/`) |
 | localhost:8443 | /api/orders/7 | `orders` — `^~ /api/orders/` | order-service, sees `/7` |
 | localhost:8443 | /api/products/7 | `products` — `^~ /api/products/` | product-service, sees `/7` |
+| localhost:8443 | /ws/ | `ws` — `^~ /ws/` (WebSocket) | realtime-service `/ws` (needs a token) |
+| localhost:8443 | /api/events/ | `events` — `^~ /api/events/` (SSE) | realtime-service `/events` (needs a token) |
 | localhost:8443 | /api/products/logo.png | `products` — `^~` beats the asset regex | product-service, sees `/logo.png` |
 | localhost:8443 | /api/usersX | `api-404` — `^~ /api/` (no slash after `users`) | nginx: JSON 404 |
 | localhost:8443 | /api/unknown | `api-404` — `^~ /api/` | nginx: JSON 404 |
@@ -421,6 +423,66 @@ curl -si -X OPTIONS -H 'Origin: http://localhost:5173' -H 'Access-Control-Reques
 
 **Login moved.** The login route is `POST /api/auth/login` (auth-service); the Phase 5 paths `/api/users/login` and `/api/users/login/` answer 308 there.
 
+## Realtime & gRPC
+
+`realtime-service` (Go 1.26) serves three kinds of long-lived or HTTP/2 traffic. The gateway proxies all three behind the Phase 8 token and the Phase 5 limits:
+
+| Route | Protocol | Library | Upstream |
+|---|---|---|---|
+| `/ws/` | WebSocket (echo: `alice: hi`, a ping every 30s) | `github.com/coder/websocket` | `realtime-service:8080/ws` |
+| `/api/events/` | Server-Sent Events (`id:` + `data:` every 1s, `: heartbeat` every 15s, resumes after `Last-Event-ID`) | standard library | `realtime-service:8080/events` |
+| `/gatekeeper.Echo/Say`, `/grpc.health.v1.Health/Check` | gRPC (unary; Echo is hand-described with protobuf's `StringValue`, no protoc) | `google.golang.org/grpc` (grpc-go) | `grpc_pass grpc://realtime-service:9090` (h2c) |
+
+```bash
+# SSE: id/data lines every second, a heartbeat comment every 15s
+curl -sN --max-time 5 -H "Authorization: Bearer $TOKEN" https://localhost:8443/api/events/
+# WebSocket: any client, e.g. websocat (brew install websocat); type a line, get "alice: <line>"
+websocat "wss://localhost:8443/ws/?access_token=$TOKEN"
+# gRPC: the server has no reflection, so grpcurl would need the .proto files;
+# the smoke tests are the client (they dial localhost:8443 with the lab CA)
+cd services && go test -count=1 -tags smoke -run GRPC ./smoke/
+```
+
+**WebSocket: the Connection header.** An upgrade needs `Upgrade: websocket` and `Connection: upgrade` passed to the backend. `proxy-headers.conf` used to force `Connection ""` for Phase 3's upstream keepalive, and a second `proxy_set_header Connection` in the same location would have sent two values. So the snippet now uses `$connection_upgrade` (a map over `$ws_route:$http_upgrade`): `upgrade` only in the `/ws/` location (which sets `$ws_route`) and only for `Upgrade: websocket`, empty otherwise. Keepalive is untouched, and no other route can be turned into a tunnel by a client-sent `Upgrade`.
+
+**HTTP/2 clients.** nginx has no WebSocket over HTTP/2 (RFC 8441, extended CONNECT). Measured: a client that negotiated `h2` by ALPN still gets its WebSocket, because the upgrade request goes out as HTTP/1.1 and nginx (1.25+) accepts HTTP/1.1 on that connection. Browsers open a separate HTTP/1.1 connection for a WebSocket anyway.
+
+**Timeouts vs heartbeats.** `proxy_read_timeout` is the longest *silence* allowed, so the stream routes allow `1h`. The service makes sure there's never that much silence: a WebSocket ping every 30s, an SSE `: heartbeat` comment every 15s. Measured: idle streams stay open past 20s, longer than any other route's timeout (orders 15s).
+
+**SSE and buffering.** The SSE location has `proxy_buffering off`, and the service sends `X-Accel-Buffering: no`. Measured in the Phase 9 probe: with buffering *on*, events still arrived on time (+0/+500/+1000ms). nginx forwards what it has whenever the client can take it. Buffering only hurts with a slow client (nginx keeps reading ahead into memory or a temp file), gzip (which waits to fill a block), or a cache. So it's off on principle, not because a test can see a delay here. `text/event-stream` isn't in `gzip_types`, and the route is never cached.
+
+**Tokens for browsers: `?access_token=`.** A browser `WebSocket` or `EventSource` can't set `Authorization`, so the realtime routes also accept the token in the query:
+- The location captures it before auth (`set $rt_bearer`), because the `/_auth` subrequest has no query string of its own.
+- The subrequest sends it as `Authorization`, and the verdict cache keys on that effective value, so query tokens never share one empty-header entry.
+- `$args_without_token` removes it, in any capitalisation (nginx's `$arg_` lookup ignores case, so the strip must too), from the query sent to the service.
+- Two `access_token` parameters, or a percent-encoded name like `access%5Ftoken`, get a **400** before auth, so no second token can ride past the strip.
+- Only `/ws/` and `/api/events/` accept it; `/api/users/?access_token=…` is still a 401.
+
+Keeping it out of logs:
+- **Access log:** the `request` field is now `$request_method $request_path $server_protocol` on every route. `$request_path` is the requested path without its query, taken from `$request_uri`, so it also survives internal redirects such as the SPA fallback.
+- **Error log:** a line there prints the raw request line, token included, whenever nginx refuses or fails a request (rate limit, `limit_conn`, auth or upstream down). The two realtime locations therefore set `error_log … crit`, which they never produce, so they write no error lines at all. The access log still records every status. The cost: realtime problems show up as statuses there, not as error-log explanations.
+
+**`limit_conn`.** `limit_req` counts requests, but a stream is one request that stays open, so a client could hold hundreds. `limit_conn streams 10` caps simultaneous realtime connections per client IP (the login zone's key, so compose networks are exempt). The 11th gets a JSON 429 `{"error":"too many connections",…}`. Both limits share the 429 page; `$limit_req_status` says which one fired.
+
+**Reloads and open streams.** `nginx -s reload` starts new workers; old workers keep their open connections, so a WebSocket would keep an old worker, and the old config, alive for hours. `worker_shutdown_timeout 30s` makes old workers close what's left after 30s. Tested: a WebSocket still works right after the reload and is closed within 35s (the timeout plus a margin). On SIGTERM, realtime-service itself ends its streams (WebSocket close 1001), drains gRPC for up to 3s and exits 0 well inside docker's 10s.
+
+**gRPC through `grpc_pass`.**
+- **Transport:** the client speaks HTTP/2 over TLS to `localhost:8443` with the lab CA; nginx speaks h2c (HTTP/2 without TLS) to `realtime-service:9090`.
+- **Identity:** `grpc_set_header` (in `snippets/grpc-headers.conf`) passes the verified identity as metadata (`x-user-id`), replacing anything the client sent.
+- **Rate limit:** each RPC is one request, so a burst of 150 RPCs on one connection hits the Phase 5 API budget.
+
+**gRPC errors.** A gRPC client reads `grpc-status`, not the HTTP code. nginx's own errors must therefore be gRPC's error-only answer: HTTP 200, `content-type: application/grpc`, `grpc-status`, `grpc-message`. These answers carry `X-Request-ID`, like every other gateway answer. A non-POST request to a gRPC path isn't a gRPC client and gets a plain 405.
+
+| nginx outcome | gRPC status |
+|---|---|
+| no or bad token (401) | `UNAUTHENTICATED` (16) |
+| forbidden (403) | `PERMISSION_DENIED` (7) |
+| rate limit (429), body over `client_max_body_size` 1m (413) | `RESOURCE_EXHAUSTED` (8) |
+| malformed request (400) | `INVALID_ARGUMENT` (3) |
+| auth-service or realtime-service down (500/502/503/504; connect timeout 1s) | `UNAVAILABLE` (14) |
+
+The trap, measured: a `return 204` with the gRPC headers doesn't work. A 204 carries no content-type, so clients only report "malformed header: missing HTTP content-type".
+
 ## Roadmap
 
 | Phase | Topic | Status |
@@ -433,8 +495,8 @@ curl -si -X OPTIONS -H 'Origin: http://localhost:5173' -H 'Access-Control-Reques
 | 5 | Rate limiting & protection | ☑ |
 | 6 | Caching | ☑ |
 | 7 | TLS & HTTP/2 | ☑ |
-| 8 | Auth at the gateway & CORS | ◐ |
-| 9 | Realtime & gRPC: WebSocket, SSE, gRPC proxy | ☐ |
+| 8 | Auth at the gateway & CORS | ☑ |
+| 9 | Realtime & gRPC: WebSocket, SSE, gRPC proxy | ◐ |
 | 10 | Performance tuning & zero-downtime | ☐ |
 | 11 | Stretch: njs, Kubernetes Ingress, Nginx vs Envoy | ☐ |
 

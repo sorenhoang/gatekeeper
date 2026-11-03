@@ -35,7 +35,7 @@ func main() {
 		log.Fatalf("auth-service: %v", err)
 	}
 	cfg := auth.Config{Key: key, Users: users, TTL: tokenTTL, Now: time.Now}
-	if err := echo.RunWith("auth-service", func(mux *http.ServeMux) { auth.Register(mux, cfg) }); err != nil {
+	if err := echo.RunWith("auth-service", func(mux *http.ServeMux) func() { auth.Register(mux, cfg); return nil }); err != nil {
 		log.Fatal(err)
 	}
 }

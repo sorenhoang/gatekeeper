@@ -20,7 +20,7 @@ services:
     ports:
       - "8080:80"
       - "8443:443"
-    depends_on: [user-service, order-service, order-service-2, order-service-3, product-service, auth-service]
+    depends_on: [user-service, order-service, order-service-2, order-service-3, product-service, auth-service, realtime-service]
     restart: "no"
 
   user-service:
@@ -51,4 +51,11 @@ services:
     # Signing key and lab users from `make secrets`.
     volumes:
       - ./secrets/auth:/etc/gatekeeper/auth:ro
+    restart: "no"
+
+  # WebSocket /ws and SSE /events on 8080, gRPC on 9090 (Phase 9). The
+  # intervals pass through from the shell so tests can shorten them.
+  realtime-service:
+    build: { context: ./services, args: { SERVICE: realtime-service } }
+    environment: [DELAY_MS, FAIL_RATE, WS_PING_INTERVAL, SSE_EVENT_INTERVAL, SSE_HEARTBEAT_INTERVAL]
     restart: "no"
