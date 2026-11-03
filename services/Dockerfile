@@ -1,7 +1,9 @@
-FROM golang:1.23-alpine AS build
+FROM golang:1.26-alpine AS build
 ARG SERVICE
 WORKDIR /src
-COPY go.mod ./
+# Modules first, in their own layer: code edits don't re-download them.
+COPY go.mod go.sum ./
+RUN go mod download
 COPY internal ./internal
 COPY cmd ./cmd
 RUN test -n "$SERVICE" || (echo "build arg SERVICE is required" && exit 1)

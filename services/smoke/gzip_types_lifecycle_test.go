@@ -24,7 +24,22 @@ func TestShouldGzipCssAndJsOfAtLeast256Bytes(t *testing.T) {
 	if out, err := nginxCmd(t, "-s", "reload"); err != nil {
 		t.Fatalf("reload with the gzip-types server: %v\n%s", err, out)
 	}
-	time.Sleep(time.Second)
+	// Setup: wait until the temporary server answers, on fresh connections.
+	// In a long run a fixed 1s wasn't always enough: a pooled connection
+	// could still reach a worker from before the reload, whose config lacks
+	// this server (the request then fell to the main server's 404).
+	fresh := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: labTLS.Clone(), DisableKeepAlives: true}}
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		req, _ := http.NewRequest(http.MethodGet, gatewayURL+"/x.css", nil)
+		req.Host = "gztypes.smoke.test"
+		if resp, err := fresh.Do(req); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+	}
+	rawClient.CloseIdleConnections()
 	for _, path := range []string{"/x.css", "/x.js"} {
 		req, _ := http.NewRequest(http.MethodGet, gatewayURL+path, nil)
 		req.Host = "gztypes.smoke.test"
