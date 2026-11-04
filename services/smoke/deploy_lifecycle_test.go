@@ -117,6 +117,11 @@ func TestShouldRefuseToDeployWhenAReplicaIsAlreadyDown(t *testing.T) {
 // A replica that never gets healthy (here: an invalid chaos setting makes it
 // exit at start) stays marked down; the others keep serving.
 func TestShouldKeepAFailedReplicaOutOfRotation(t *testing.T) {
+	// Setup: after a replica that exits at start, Docker Desktop's [::1]
+	// forwarding can reset bursts of new connections for minutes (measured:
+	// 16 resets in the Phase 5 spike tests); a fresh gateway clears it.
+	// Registered before restoreStack so it runs after make up.
+	recreateGatewayAfterBench(t)
 	restoreStack(t)
 	before := upstreams(t)
 	t.Cleanup(func() { writeUpstreams(t, before); runMake(t, "reload") })

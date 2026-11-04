@@ -44,7 +44,17 @@ func warmClient(t *testing.T, n int) *http.Client {
 		go func() {
 			defer wg.Done()
 			<-start
-			resp, err := client.Get(gatewayURL + "/health")
+			// Setup, not measurement: after heavy lifecycle tests Docker
+			// Desktop's [::1] forwarding can reset a few of n simultaneous
+			// new connections (Phase 10), so a failed warm-up is retried.
+			var resp *http.Response
+			var err error
+			for try := 0; try < 5; try++ {
+				if resp, err = client.Get(gatewayURL + "/health"); err == nil {
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
 			if err != nil {
 				t.Errorf("warming connection: %v", err)
 				return
