@@ -18,7 +18,7 @@ type routeRow struct{ host, url, xRoute string }
 // The X-Route cell holds the header value in backticks, e.g. `users`.
 func routeTable(t *testing.T) []routeRow {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	b, err := os.ReadFile(filepath.Join(repoRoot, "GUIDE.md"))
 	if err != nil {
 		t.Fatal(err)
 	}

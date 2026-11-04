@@ -14,7 +14,7 @@ import (
 // The verdicts follow the bar: kept means at least 10% more req/s or 10%
 // lower p95, rejected means neither. Every row carries its numbers.
 func TestShouldKeepOnlyCandidatesThatClearTheTenPercentBar(t *testing.T) {
-	readme, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	readme, err := os.ReadFile(filepath.Join(repoRoot, "GUIDE.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
