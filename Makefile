@@ -4,11 +4,8 @@ NGINX := docker compose exec -T gateway nginx -c /etc/nginx/gatekeeper/nginx.con
 # and `make up` recreates all services, reshuffling their IPs behind nginx.
 export BUILDX_NO_DEFAULT_ATTESTATIONS := 1
 
-API_ROUTES  := users orders products
-# 50 x 0.2s: how long `make up` waits for each route before only warning.
-READY_TRIES := 50
 
-.PHONY: certs secrets up down reload logs status trace test test-lifecycle
+.PHONY: certs secrets up down reload logs status trace test test-lifecycle bench bench-compare deploy
 
 # Lab CA + gateway certificate in certs/ (gitignored); keeps valid files,
 # reissues a leaf that expires within 30 days. CERTS_DIR overrides the folder.
@@ -26,19 +23,11 @@ up: certs secrets
 	rm -f nginx/conf.d/zz-smoke-*.conf
 	docker compose up -d --build --wait
 	@# A reload re-resolves the upstreams now (measured: 0.2s vs ~3s for a
-	@# service that was missing); then wait for each route. A route that stays
-	@# down only warns: a stopped service is a valid state, not a failed `up`.
-	@# Any answer but 000/502/503/504 counts: users and orders say 401 without
-	@# a token, which still proves the route is up.
+	@# service that was missing); then wait until each route reaches its
+	@# service (scripts/ready.sh: with a lab token, since a 401 from the auth
+	@# check comes back before nginx contacts the service at all).
 	$(NGINX) -s reload
-	@for route in $(API_ROUTES); do \
-		for i in $$(seq $(READY_TRIES)); do \
-			code=$$(curl -s -o /dev/null -w '%{http_code}' --cacert certs/ca.pem https://localhost:8443/api/$$route/); \
-			case $$code in 000|502|503|504) ;; *) break ;; esac; \
-			[ $$i -eq $(READY_TRIES) ] && echo "warning: /api/$$route/ not answering yet" >&2; \
-			sleep 0.2; \
-		done; \
-	done
+	@./scripts/ready.sh
 
 down:
 	docker compose down --remove-orphans
@@ -64,7 +53,7 @@ trace:
 
 # stub_status listens on loopback inside the gateway only (status.conf).
 status:
-	docker compose exec -T gateway wget -qO- -T 2 http://127.0.0.1:8082/nginx_status
+	docker compose exec -T gateway wget -qO- -T 2 http://127.0.0.1:8086/nginx_status
 
 test:
 	cd services && go test -count=1 -tags smoke ./smoke/
@@ -73,3 +62,17 @@ test:
 # Takes ~10 min, past go test's default 10m timeout.
 test-lifecycle:
 	cd services && go test -count=1 -timeout 30m -tags smoke,lifecycle ./smoke/
+
+# k6 from the compose network (exempt from the rate limits): a warm-up, then
+# RUNS runs per scenario; prints `<scenario> <median_rps> <p95_ms> <failed>`.
+# SCENARIOS, RUNS, DURATION, VUS override the defaults (scripts/bench.sh).
+bench:
+	@./scripts/bench.sh
+
+# Interleaved baseline vs candidate runs: CANDIDATE=<loadtest/candidates/*.env>.
+bench-compare:
+	@./scripts/bench-compare.sh
+
+# Drained rolling redeploy of every replica of SERVICE (scripts/deploy.sh).
+deploy:
+	@./scripts/deploy.sh

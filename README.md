@@ -27,7 +27,7 @@ The services are intentionally simple. The point of this project is the gateway:
 | Gateway | Nginx (open source, official Docker image) |
 | Services | Go 1.26 (standard library `net/http`; since Phase 9 `github.com/coder/websocket` and `google.golang.org/grpc` for realtime-service) |
 | Orchestration | Docker Compose |
-| Load testing | k6, `wrk`, `curl` |
+| Load testing | k6 0.57 in a container (`make bench`, since Phase 10), `curl` |
 | TLS (local) | openssl (mkcert optional) |
 
 ## Layout
@@ -38,6 +38,9 @@ gatekeeper/
 ├── Makefile                 # certs, up, down, reload, test, logs
 ├── scripts/certs.sh         # lab CA + gateway certificate (make certs)
 ├── scripts/secrets.sh       # signing key, lab users, admin htpasswd (make secrets)
+├── scripts/ready.sh         # make up: wait until every API route reaches its service
+├── scripts/bench*.sh        # make bench, make bench-compare (k6 in a container)
+├── scripts/deploy.sh        # make deploy SERVICE=...: drained rolling redeploy
 ├── nginx/                   # mounted at /etc/nginx/gatekeeper (nginx -c .../nginx.conf)
 │   ├── nginx.conf           # main context: workers, events, http
 │   ├── conf.d/              # one file per virtual server
@@ -55,7 +58,7 @@ gatekeeper/
 │   └── smoke/               # stack tests run by `make test`
 ├── frontend/                # static files served directly by Nginx (SPA shell + assets/)
 ├── admin/                   # admin.localhost content, outside the main root
-├── loadtest/                # k6 scripts
+├── loadtest/                # k6 scenarios, tuning candidates/, results/ (git-ignored)
 └── certs/                   # made by make certs, git-ignored, mounted read-only
 ```
 
@@ -233,7 +236,7 @@ Values to expect in the `upstream_*` fields:
   ```
 - **Caveat:** with large responses, a slow client can also slow nginx's reads from the backend (response buffering fills up), so treat the split as exact only for small responses.
 
-**Counters.** nginx's `stub_status` page listens on `127.0.0.1:8082` inside the gateway only: not published, not reachable from the compose network. `make status` prints it:
+**Counters.** nginx's `stub_status` page listens on `127.0.0.1:8086` inside the gateway only: not published, not reachable from the compose network. `make status` prints it:
 ```
 Active connections: 2
 server accepts handled requests
@@ -483,6 +486,108 @@ Keeping it out of logs:
 
 The trap, measured: a `return 204` with the gRPC headers doesn't work. A 204 carries no content-type, so clients only report "malformed header: missing HTTP content-type".
 
+## Performance & zero-downtime
+
+### Measuring
+
+```sh
+make bench                                   # k6, mixed scenario: median req/s, p95, failed checks
+SCENARIOS="mixed static orders" RUNS=5 make bench
+CANDIDATE=open-file-cache SCENARIOS=static make bench-compare
+```
+
+`make bench` runs [k6](https://k6.io) in a container on the compose network, so
+it measures the gateway, not Docker Desktop's port forwarding, and it isn't
+subject to the Phase 5 rate limits (the compose network is exempt). Each scenario
+gets one warm-up run, which is thrown away (cold runs measured 13.8k, 28.6k and
+37.3k req/s in a row), then `RUNS` measured runs. It prints the medians:
+`<scenario> <req/s> <p95 ms> <failed checks>`. Each run's JSON summary goes to
+`loadtest/results/`.
+
+| Scenario | What it does |
+|---|---|
+| `mixed` | users and orders with the lab token (auth_request + upstream), plus the cached `/api/products/bench` |
+| `static` | the SPA shell and an asset, served by nginx itself |
+| `orders` | 30 users doing GET and POST on orders as admin; also checks that no answer is degraded (`X-Degraded`) |
+
+`make bench-compare` swaps one candidate from `loadtest/candidates/` in and out.
+It runs baseline and candidate alternately (interleaved, with the order flipped
+every round), so drift on a busy laptop hits both sides alike, and restores the
+config afterwards, even when a run fails. A candidate that is already in the
+config (a kept one) is refused, since there would be nothing to compare.
+
+### What was tuned
+
+A candidate is kept only if it gains at least 10% in median req/s or p95.
+Medians of 3 interleaved runs of 15s, 50 users, on the lab machine (12 CPUs,
+Docker Desktop):
+
+| Candidate | Scenario | Baseline | Tuned | Change | Verdict |
+|---|---|---|---|---|---|
+| `open-file-cache` | static | 20645 req/s, p95 4.99ms | 123071 req/s, p95 1.10ms | +496% req/s, −78% p95 | kept |
+| `access-log-buffer` | mixed | 51799 req/s, p95 2.65ms | 53968 req/s, p95 2.46ms | +4.2% req/s, −7.2% p95 | rejected |
+| `keepalive-requests` | mixed | 51789 req/s, p95 2.61ms | 52801 req/s, p95 2.53ms | +2.0% req/s, −3.1% p95 | rejected |
+| `upstream-keepalive` | mixed | 51092 req/s, p95 2.65ms | 50607 req/s, p95 2.68ms | −0.9% req/s, +1.1% p95 | rejected |
+
+- **open_file_cache** wins big here because the static files sit on a Docker
+  Desktop bind mount, where every `open()`/`stat()` crosses into the VM. On a
+  native Linux filesystem the gain would be much smaller.
+- **Buffered access logs** help a little but stay under the bar. They would
+  also delay log lines by up to 200ms.
+- **keepalive_requests 10000** changes nothing: k6 keeps its connections well
+  under the default of 1000 requests in a 15s run.
+- **upstream keepalive 64**: 32 idle connections per worker are already enough
+  for this load.
+- **worker_rlimit_nofile** was never a candidate: the container already allows
+  1048576 open files, far more than 12 workers × 1024 connections need.
+
+### Zero-downtime
+
+**Config changes: `make reload`.** nginx checks the new config, starts new
+workers with it, and tells the old ones to stop accepting connections and finish
+what they're doing. Requests already in flight finish on the old config.
+Long-lived streams (WebSocket, SSE) get up to `worker_shutdown_timeout` (30s)
+before an old worker closes them. Three reloads under the `orders` load: 0
+failed checks.
+
+**Service changes: `make deploy SERVICE=order-service`.** This is a rolling
+redeploy. The image is built once, then each replica in turn goes through these
+steps:
+
+1. Mark the replica `down` in `nginx/conf.d/upstreams.conf` and reload, so no new
+   request goes to it.
+2. Wait until every worker from before the reload has exited. An old worker
+   exits only when its requests are done, so the ones already on that replica
+   have answered, unless `worker_shutdown_timeout` (30s) cut them first.
+3. Recreate the replica and wait until it is healthy (at most 30s).
+4. Remove `down` and reload.
+
+```sh
+make deploy SERVICE=order-service
+```
+
+Draining is what makes this safe. The gateway never retries a POST (Phase 3),
+so simply recreating a replica can fail the POSTs it is serving: 2 of 674221
+requests failed when this phase was planned. With draining, a 4s POST that
+is in flight when the deploy starts answers 200 before its replica is
+recreated, and a deploy under the `orders` load (30 users, GET and POST) has 0
+failed checks and no degraded (`X-Degraded`) answers.
+
+The deploy refuses to start when a replica is already marked `down` or isn't
+running, so it never takes two replicas out at once. If a new replica never
+gets healthy, the deploy stops and leaves that replica marked `down`; the
+others keep serving. Fix it and remove that `down` by hand, then deploy
+again. Any other failure, including Ctrl-C, puts the replica back in rotation.
+The script edits `upstreams.conf` with python3 rather than `sed -i`, because
+`sed -i` replaces the file and the gateway's bind mount would keep the old one.
+
+**What still causes downtime: recreating the gateway** (`docker compose up
+--force-recreate gateway`, or a change to its compose settings). It is one
+container holding the listening sockets, so new connections are refused until
+it is back, and Docker Desktop's IPv6 localhost forwarding returns a little
+later than IPv4. Removing that would take a second gateway behind a load
+balancer or a shared socket, which is out of scope for this lab.
+
 ## Roadmap
 
 | Phase | Topic | Status |
@@ -496,8 +601,8 @@ The trap, measured: a `return 204` with the gRPC headers doesn't work. A 204 car
 | 6 | Caching | ☑ |
 | 7 | TLS & HTTP/2 | ☑ |
 | 8 | Auth at the gateway & CORS | ☑ |
-| 9 | Realtime & gRPC: WebSocket, SSE, gRPC proxy | ◐ |
-| 10 | Performance tuning & zero-downtime | ☐ |
+| 9 | Realtime & gRPC: WebSocket, SSE, gRPC proxy | ☑ |
+| 10 | Performance tuning & zero-downtime | ◐ |
 | 11 | Stretch: njs, Kubernetes Ingress, Nginx vs Envoy | ☐ |
 
 Detailed phase notes live in `docs/` (kept local, not committed).

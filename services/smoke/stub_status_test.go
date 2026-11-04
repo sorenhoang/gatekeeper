@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const statusURL = "http://127.0.0.1:8082/nginx_status"
+const statusURL = "http://127.0.0.1:8086/nginx_status"
 
 func statusPage(t *testing.T) string {
 	t.Helper()
@@ -66,12 +66,12 @@ func TestShouldCountRequestsInStubStatus(t *testing.T) {
 
 // Loopback only: not from the host, and not from the compose network either.
 func TestShouldKeepStubStatusOffEveryNetwork(t *testing.T) {
-	if conn, err := net.DialTimeout("tcp", "localhost:8082", time.Second); err == nil {
+	if conn, err := net.DialTimeout("tcp", "localhost:8086", time.Second); err == nil {
 		conn.Close()
-		t.Errorf("localhost:8082 is reachable from the host")
+		t.Errorf("localhost:8086 is reachable from the host")
 	}
 	out, err := compose(t, "exec", "-T", "gateway", "sh", "-c",
-		`wget -qO- -T 2 "http://$(hostname -i):8082/nginx_status"`)
+		`wget -qO- -T 2 "http://$(hostname -i):8086/nginx_status"`)
 	if err == nil {
 		t.Errorf("stub_status answered on the gateway's compose-network address:\n%s", out)
 	}
