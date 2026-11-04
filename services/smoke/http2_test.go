@@ -76,7 +76,7 @@ func TestShouldCacheAndGzipOverHTTP2(t *testing.T) {
 }
 
 func TestShouldDocumentTLSInTheReadme(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	b, err := os.ReadFile(filepath.Join(repoRoot, "GUIDE.md"))
 	if err != nil {
 		t.Fatal(err)
 	}

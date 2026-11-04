@@ -44,7 +44,7 @@ func TestShouldAnswerPreflightsOnEveryAPIRoute(t *testing.T) {
 // Since Phase 8 users and orders need a token: a README example that calls
 // them must send one, or say it expects the 401.
 func TestShouldKeepTheReadmeExamplesWorkingWithAuth(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	b, err := os.ReadFile(filepath.Join(repoRoot, "GUIDE.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
