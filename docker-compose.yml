@@ -15,7 +15,8 @@ services:
       - ./admin:/usr/share/nginx/admin:ro
       # From `make certs`; never committed.
       - ./certs:/etc/nginx/certs:ro
-      # Only the gateway's half of `make secrets`: never the signing key.
+      # Only the gateway's half of `make secrets`: never the signing key
+      # (Phase 11's njs auth check adds it only via docker-compose.njs.yml).
       - ./secrets/gateway:/etc/nginx/secrets:ro
     ports:
       - "8080:80"
@@ -24,6 +25,25 @@ services:
     restart: "no"
     # A load test writes hundreds of thousands of access-log lines; bounded
     # rotation keeps the container log (and `docker compose logs`) small.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # A second gateway in front of the same services, for comparison
+  # (README "Nginx vs Envoy"). Loopback only: the lab's front door is nginx.
+  envoy:
+    image: envoyproxy/envoy:v1.38.9
+    command: ["envoy", "-c", "/etc/envoy/gatekeeper/envoy.yaml", "--log-level", "warn"]
+    volumes:
+      - ./envoy:/etc/envoy/gatekeeper:ro
+      # The same lab certificate as the gateway; from `make certs`.
+      - ./certs:/etc/envoy/certs:ro
+    ports:
+      - "127.0.0.1:9443:9443"
+    depends_on: [user-service, order-service, order-service-2, order-service-3, product-service, auth-service]
+    restart: "no"
     logging:
       driver: json-file
       options:

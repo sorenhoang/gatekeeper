@@ -24,7 +24,8 @@ The services are intentionally simple. The point of this project is the gateway:
 
 | Part | Choice |
 |---|---|
-| Gateway | Nginx (open source, official Docker image) |
+| Gateway | Nginx (open source, official Docker image; njs since Phase 11) |
+| Second gateway | Envoy 1.38 (`envoy/envoy.yaml`, for comparison, since Phase 11) |
 | Services | Go 1.26 (standard library `net/http`; since Phase 9 `github.com/coder/websocket` and `google.golang.org/grpc` for realtime-service) |
 | Orchestration | Docker Compose |
 | Load testing | k6 0.57 in a container (`make bench`, since Phase 10), `curl` |
@@ -41,9 +42,13 @@ gatekeeper/
 ├── scripts/ready.sh         # make up: wait until every API route reaches its service
 ├── scripts/bench*.sh        # make bench, make bench-compare (k6 in a container)
 ├── scripts/deploy.sh        # make deploy SERVICE=...: drained rolling redeploy
+├── envoy/envoy.yaml         # the Envoy twin of the gateway (127.0.0.1:9443)
+├── k8s/                     # Ingress and Gateway API examples, never applied
+├── docker-compose.njs.yml   # opt-in: the signing key for the njs auth check
 ├── nginx/                   # mounted at /etc/nginx/gatekeeper (nginx -c .../nginx.conf)
 │   ├── nginx.conf           # main context: workers, events, http
 │   ├── conf.d/              # one file per virtual server
+│   ├── njs/                 # njs scripts (auth.js)
 │   └── snippets/            # reusable blocks (proxy headers, ssl, cors)
 ├── services/                # one Go module, one Dockerfile (ARG SERVICE)
 │   ├── go.mod
@@ -525,6 +530,7 @@ Docker Desktop):
 | Candidate | Scenario | Baseline | Tuned | Change | Verdict |
 |---|---|---|---|---|---|
 | `open-file-cache` | static | 20645 req/s, p95 4.99ms | 123071 req/s, p95 1.10ms | +496% req/s, −78% p95 | kept |
+| `njs-auth` | mixed | 43149 req/s, p95 3.16ms | 15068 req/s, p95 8.71ms | −65.1% req/s, +175.6% p95 | rejected |
 | `access-log-buffer` | mixed | 51799 req/s, p95 2.65ms | 53968 req/s, p95 2.46ms | +4.2% req/s, −7.2% p95 | rejected |
 | `keepalive-requests` | mixed | 51789 req/s, p95 2.61ms | 52801 req/s, p95 2.53ms | +2.0% req/s, −3.1% p95 | rejected |
 | `upstream-keepalive` | mixed | 51092 req/s, p95 2.65ms | 50607 req/s, p95 2.68ms | −0.9% req/s, +1.1% p95 | rejected |
@@ -538,6 +544,9 @@ Docker Desktop):
   under the default of 1000 requests in a 15s run.
 - **upstream keepalive 64**: 32 idle connections per worker are already enough
   for this load.
+- **njs auth** (Phase 11, see "njs" below) gives the same answers but is far
+  slower here: the baseline answers almost every check from its 10s verdict
+  cache, while njs runs the HMAC check in a fresh VM clone for every request.
 - **worker_rlimit_nofile** was never a candidate: the container already allows
   1048576 open files, far more than 12 workers × 1024 connections need.
 
@@ -588,6 +597,176 @@ it is back, and Docker Desktop's IPv6 localhost forwarding returns a little
 later than IPv4. Removing that would take a second gateway behind a load
 balancer or a shared socket, which is out of scope for this lab.
 
+## njs
+
+[njs](https://nginx.org/en/docs/njs/) is nginx's JavaScript. The official
+image ships it as a dynamic module, so `nginx.conf` only needs
+`load_module modules/ngx_http_js_module.so;` and `js_import`.
+
+`nginx/njs/auth.js` does auth-service's token check inside the gateway:
+- the fixed HS256 header;
+- HMAC-SHA256 with the signing key, compared in constant time;
+- `exp`, `sub` and `role` required;
+- DELETE for admins only.
+
+It answers on an internal `location = /_auth_njs` with 204 plus `X-User-ID` /
+`X-User-Role`, or 401 or 403, the same contract as `/_auth`. Switching
+`auth_request /_auth;` to `/_auth_njs` in `snippets/auth-check.conf` (the
+`njs-auth` candidate) changes nothing a client can see. The test suite runs the
+whole Phase 8 auth matrix both ways and compares the answers.
+
+What it taught:
+
+- **Read variables from the subrequest's answer.** `auth_request_set` reads
+  `$sent_http_x_user_id`, not `$upstream_http_x_user_id`. A `js_content`
+  location has no upstream, so the `$upstream_http_*` form comes back empty.
+  `$sent_http_*` works for both checks.
+- **An unknown `auth_request` target fails open.** Before `/_auth_njs`
+  existed, pointing `auth_request` at it let every request through: the URI
+  fell through to the site, which answered 200, and `auth_request` treats any
+  2xx as allowed. The check has to be an exact, internal location.
+- **JavaScript doesn't check types for you.** Go's `json.Unmarshal` into
+  `int64`/`string` rejects `"exp":"9999999999"` or `"role":["admin"]`. A
+  truthiness check in JS accepts both, and an array role then reads as
+  `admin`. The njs check tests the types explicitly. A second test matrix
+  (mistyped claims, non-object payloads, malformed tokens) proves both checks
+  agree.
+- **Every request gets a fresh VM clone.** Anything computed during a request
+  is gone by the next one. Only top-level code, run at config load, is shared,
+  so the key is read there.
+- **Faster on paper isn't faster here.** The subrequest version answers almost
+  every check from its 10s cache. njs runs the check every time and measured
+  65% slower (see the tuning table), so `auth_request` stays the default.
+- **Local checks need the key.** To verify HS256 locally, the gateway needs
+  the signing key, and with it the gateway could also mint tokens. Phase 8
+  keeps the key out of the gateway, and the default stack still does. The key
+  is mounted only through the opt-in `docker-compose.njs.yml` (read-only, just
+  `jwt.key`, never `users.json`), and never appears in `nginx -T` or the logs.
+  To try the njs check:
+
+  ```sh
+  docker compose -f docker-compose.yml -f docker-compose.njs.yml up -d gateway
+  CANDIDATE=njs-auth make bench-compare
+  docker compose up -d --force-recreate gateway   # back to the default, without the key
+  ```
+
+  A real setup would sign with ES256 or RS256 and give the gateway only the
+  public key.
+
+## Nginx vs Envoy
+
+`envoy/envoy.yaml` runs a second gateway, Envoy 1.38, on
+`https://localhost:9443` (loopback only), in front of the same services:
+
+```sh
+curl --cacert certs/ca.pem https://localhost:9443/api/products/1
+make bench-gateways                 # nginx and Envoy, same k6 load, interleaved
+SCENARIOS=mixed TARGET=envoy make bench
+```
+
+| Gatekeeper (nginx) | Envoy twin |
+|---|---|
+| `location ^~ /api/users/` + `proxy_pass http://users/;` | route `prefix: /api/users/` + `prefix_rewrite: /` |
+| `upstream orders { server … ×3; }`, round-robin | cluster `orders`, `STRICT_DNS`, `ROUND_ROBIN` |
+| `proxy_next_upstream` without `non_idempotent` | `retry_policy` only on a route that matches `:method GET` |
+| `auth_request /_auth;` → auth-service `GET /verify` | `ext_authz` → auth-service `<method> /verify<path>` |
+| `auth_request_set` + `proxy_set_header X-User-ID` | `allowed_upstream_headers` (set, replacing a client's) |
+| `nginx -s reload`: new workers, old ones drain | `envoy.yaml` is static here; real setups push config over xDS |
+
+Medians of 3 interleaved runs (`make bench-gateways`), 50 users, 15s, from
+the compose network, on the lab machine (12 CPUs, Docker Desktop):
+
+| Scenario | nginx | Envoy |
+|---|---|---|
+| mixed | 51248 req/s, p95 2.62ms | 29750 req/s, p95 3.81ms |
+| orders | 37523 req/s, p95 3.50ms | 27275 req/s, p95 3.93ms |
+
+Read the numbers with what each side does:
+
+- **nginx answers much of this load from caches Envoy doesn't have.** Its auth
+  **verdict cache** (10s) means one `auth_request` covers thousands of
+  requests. Envoy asks auth-service on every request. `mixed` also hits the
+  products response **cache** (Phase 6), which Envoy proxies every time.
+- **Only nginx has:**
+  - the response cache;
+  - the **rate limits** (Phase 5): the bench is exempt on nginx anyway;
+  - the JSON **error pages** (Envoy answers with its own plain bodies);
+  - the static site and the admin host;
+  - WebSocket, SSE and gRPC routes;
+  - `stub_status`.
+- **Only Envoy has:**
+  - an **admin** endpoint with per-cluster stats, not enabled here;
+  - dynamic config over xDS.
+- **Tuned vs defaults.** nginx carries Phase 10's measured tuning; Envoy runs
+  with defaults. k6 and both gateways share one Docker Desktop VM, so this
+  measures these two setups on this machine, not the engines in general.
+
+What building the twin taught:
+
+- **Envoy's `ext_authz` allows only a 200.** auth-service's 204 came back to the
+  client as an empty answer. So the Envoy path answers 200, while nginx's
+  `GET /verify` stays 204.
+- **The check goes to `/verify<client path>` with the client's method.** Before
+  auth-service had a `/verify/` handler, its echo answered 200 there and Envoy
+  let every request through, the same fail-open trap as an unknown
+  `auth_request` target.
+- **Paths must be normalized before the check.** Without `normalize_path`,
+  `/api/products/%2e%2e/users/` skipped auth.
+- **Docker DNS and a stopped replica.** Envoy keeps a stopped replica's last
+  address (Docker stops answering for its name). GETs are retried elsewhere;
+  POSTs to it fail, by design, as on nginx.
+
+## Kubernetes
+
+Gatekeeper runs on Docker Compose. On Kubernetes, the same gateway is an
+**Ingress** controller or, now, a **Gateway API** implementation. The
+`k8s/` files show both. They are examples only: no Make target or script runs
+`kubectl` or `helm`, so nothing here can touch whatever cluster your kube
+context points at.
+
+| Gatekeeper | Ingress (`k8s/ingress.yaml`) | Gateway API (`k8s/gateway-api.yaml`) |
+|---|---|---|
+| `server_name`, `listen 443 ssl` | `spec.rules[].host`, `spec.tls` | `Gateway` listener, `protocol: HTTPS`, `certificateRefs` |
+| `location ^~ /api/users/` + `proxy_pass …/;` | regex path + `rewrite-target` annotation | `HTTPRoute` `PathPrefix` + `URLRewrite` `ReplacePrefixMatch` |
+| `upstream orders` (3 replicas) | a `Service` with 3 pods | `backendRefs` to the same `Service` |
+| `auth_request` | `auth-url` annotation (controller-specific) | the controller's policy resource (not core API) |
+| `limit_req` | `limit-rps` annotation (controller-specific) | the controller's policy resource (not core API) |
+
+**ingress-nginx is retired.** The Kubernetes project's ingress-nginx
+controller, the one most "Nginx Ingress" guides describe, is retired (no
+maintenance since March 2026). Its features lived in annotations, so the same
+Ingress meant different things on different controllers. Gateway API is the
+current path:
+- routes, rewrites, TLS and traffic splitting are typed fields;
+- auth and rate limits attach as the implementation's policies, for example
+  NGINX Gateway Fabric (nginx underneath) or Envoy Gateway (Envoy
+  underneath).
+
+The routing carries over directly. The rest depends on the controller:
+- auth and rate limits become its policies;
+- the response cache, njs, the JSON error pages and the realtime tuning have no
+  core Gateway API equivalent.
+
+## Where to go next
+
+The lab covered nginx from static files to zero-downtime deploys. Ways to
+keep going, roughly from closest to furthest:
+
+- **Asymmetric tokens.** Sign with ES256 in auth-service and give the gateway
+  only the public key. njs can then check tokens locally without being able
+  to mint them (README "njs"), which is the way JWT gateways usually work.
+- **Run it on a local cluster.** Use kind with its own kubeconfig, never the
+  default context. Install NGINX Gateway Fabric, apply `k8s/gateway-api.yaml`,
+  then point `make bench` at the cluster's port and compare.
+- **Observability beyond logs.** Export nginx and Envoy metrics to Prometheus
+  (nginx-prometheus-exporter reads `stub_status`; Envoy has `/stats/prometheus`)
+  and trace requests with OpenTelemetry, keeping the request id from Phase 4.
+- **Envoy's dynamic side.** Replace `envoy.yaml` with an xDS control plane
+  and watch config change without a restart.
+- **Production hardening.** Run several gateway replicas behind a load
+  balancer (so recreating one isn't downtime), add a WAF (ModSecurity or
+  Coraza), and get certificates from ACME instead of the lab CA.
+
 ## Roadmap
 
 | Phase | Topic | Status |
@@ -602,8 +781,8 @@ balancer or a shared socket, which is out of scope for this lab.
 | 7 | TLS & HTTP/2 | ☑ |
 | 8 | Auth at the gateway & CORS | ☑ |
 | 9 | Realtime & gRPC: WebSocket, SSE, gRPC proxy | ☑ |
-| 10 | Performance tuning & zero-downtime | ◐ |
-| 11 | Stretch: njs, Kubernetes Ingress, Nginx vs Envoy | ☐ |
+| 10 | Performance tuning & zero-downtime | ☑ |
+| 11 | Stretch: njs, Kubernetes Ingress, Nginx vs Envoy | ☑ |
 
 Detailed phase notes live in `docs/` (kept local, not committed).
 

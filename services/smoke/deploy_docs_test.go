@@ -11,7 +11,7 @@ import (
 )
 
 // The README explains the zero-downtime operations, including what still
-// causes downtime, and the roadmap shows Phase 9 done and Phase 10 underway.
+// causes downtime, and the Makefile has the deploy target.
 func TestShouldDocumentZeroDowntimeOperations(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
 	if err != nil {
@@ -28,11 +28,7 @@ func TestShouldDocumentZeroDowntimeOperations(t *testing.T) {
 			t.Errorf("README performance section doesn't mention %q", want)
 		}
 	}
-	for _, row := range []string{`(?m)^\| 9 \|.*\| ☑ \|$`, `(?m)^\| 10 \|.*\| ◐ \|$`} {
-		if !regexp.MustCompile(row).MatchString(readme) {
-			t.Errorf("roadmap lacks a row matching %s", row)
-		}
-	}
+	// The roadmap itself is checked by readme_routes_test.go, updated each phase.
 	mk, _ := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
 	if !regexp.MustCompile(`(?m)^deploy:`).Match(mk) {
 		t.Error("Makefile has no deploy target")

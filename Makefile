@@ -5,7 +5,7 @@ NGINX := docker compose exec -T gateway nginx -c /etc/nginx/gatekeeper/nginx.con
 export BUILDX_NO_DEFAULT_ATTESTATIONS := 1
 
 
-.PHONY: certs secrets up down reload logs status trace test test-lifecycle bench bench-compare deploy
+.PHONY: certs secrets up down reload logs status trace test test-lifecycle bench bench-compare bench-gateways deploy
 
 # Lab CA + gateway certificate in certs/ (gitignored); keeps valid files,
 # reissues a leaf that expires within 30 days. CERTS_DIR overrides the folder.
@@ -72,6 +72,10 @@ bench:
 # Interleaved baseline vs candidate runs: CANDIDATE=<loadtest/candidates/*.env>.
 bench-compare:
 	@./scripts/bench-compare.sh
+
+# nginx and Envoy under the same load, interleaved (scripts/bench-gateways.sh).
+bench-gateways:
+	@./scripts/bench-gateways.sh
 
 # Drained rolling redeploy of every replica of SERVICE (scripts/deploy.sh).
 deploy:

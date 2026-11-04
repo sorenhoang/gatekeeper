@@ -13,11 +13,13 @@ export const options = {
 };
 
 const base = __ENV.BASE || 'https://gateway';
+// Login always goes through the nginx gateway: Envoy has no /api/auth/ route.
+const authBase = __ENV.AUTH_BASE || 'https://gateway';
 // From `make secrets`, mounted read-only by scripts/bench.sh.
 const users = JSON.parse(open('/secrets/users.json'));
 
 export function setup() {
-  const r = http.post(`${base}/api/auth/login`,
+  const r = http.post(`${authBase}/api/auth/login`,
     JSON.stringify({ username: 'alice', password: users.alice.password }),
     { headers: { 'Content-Type': 'application/json' } });
   if (r.status !== 200) throw new Error(`login failed: ${r.status} ${r.body}`);
