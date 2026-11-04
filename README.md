@@ -1,30 +1,65 @@
 # Gatekeeper
 
-A hands-on lab for learning **Nginx** by building a small API gateway in front of a set of Go microservices.
+**Learn Nginx by building an API gateway**: routing, load balancing, rate limiting,
+caching, TLS, auth, realtime, tuning and zero-downtime deploys, in front of a set of
+small Go services.
 
-The services are intentionally simple. The point of this project is the gateway: every phase adds one Nginx capability (routing, load balancing, rate limiting, caching, TLS, auth, realtime, tuning) and verifies it with real traffic, including deliberately breaking it to see how it fails.
+The services are deliberately simple; the gateway is the point. Each of the 12 phases
+adds one Nginx capability, proves it with real traffic, and then breaks it on purpose
+to see how it fails. Every claim in this README is checked by a smoke test against the
+running stack.
+
+> **New here?** Read [Architecture](#architecture), run [Getting started](#getting-started),
+> then skim the [mind map](claudedocs/mind-map.md) for how the pieces fit.
+
+## Contents
+
+| | |
+|---|---|
+| **Start** | [Architecture](#architecture) · [Mind map](#mind-map) · [Tech stack](#tech-stack) · [Layout](#layout) · [Getting started](#getting-started) |
+| **The gateway** | [Routes](#routes) · [Proxying](#proxying) · [Why a 502 or a 504](#why-a-502-or-a-504) · [Load balancing](#load-balancing) · [Observability](#observability) · [Rate limiting](#rate-limiting) · [Caching](#caching) · [TLS & HTTP/2](#tls--http2) · [Auth & CORS](#auth--cors) · [Realtime & gRPC](#realtime--grpc) |
+| **Operating it** | [Performance & zero-downtime](#performance--zero-downtime) |
+| **Beyond Nginx** | [njs](#njs) · [Nginx vs Envoy](#nginx-vs-envoy) · [Kubernetes](#kubernetes) · [Where to go next](#where-to-go-next) |
+| **About** | [Roadmap](#roadmap) · [Learning method](#learning-method) |
 
 ## Architecture
 
+```mermaid
+flowchart LR
+  client([client]) -->|"HTTPS + HTTP/2 :8443<br/>HTTP :8080 → redirect"| gw
+
+  subgraph gw[Nginx gateway]
+    direction TB
+    routing[routing · rate limits · cache]
+    auth[auth_request · CORS · TLS]
+    realtime[WebSocket · SSE · gRPC]
+  end
+
+  gw -->|/| frontend[(frontend<br/>static SPA)]
+  gw -->|/api/users/| users[user-service]
+  gw -->|/api/orders/| orders[order-service ×3]
+  gw -->|/api/products/| products[product-service]
+  gw -->|/ws/ · /api/events/ · gRPC| rt[realtime-service]
+  gw -.->|auth subrequest| authsvc[auth-service]
+  orders -.->|all replicas down| backup[degraded backup<br/>127.0.0.1:8081]
+
+  envoy[Envoy twin<br/>127.0.0.1:9443] -.->|same core routes| users & orders & products
 ```
-                    ┌──────────────────────────────────────┐
-  client ──HTTP(S)─▶│              Nginx (gateway)         │
-                    │  routing · LB · rate limit · cache   │
-                    │  TLS · auth_request · WS/SSE · logs  │
-                    └──┬──────────┬──────────┬──────────┬──┘
-                       │          │          │          │
-                 /     │ /api/users│/api/orders│/api/products
-                       ▼          ▼          ▼          ▼
-                  frontend   user-svc   order-svc×3  product-svc
-                  (static)                              │
-                                 auth-svc ◀── auth_request (subrequest)
-```
+
+Only the gateway (and, on loopback, the Envoy twin) is published; the services are
+reachable only on the compose network.
+
+## Mind map
+
+A one-page map of the whole project: components, the main request flows, the data,
+the rules the config enforces and the gotchas found along the way, each linked to its
+file. **→ [claudedocs/mind-map.md](claudedocs/mind-map.md)**
 
 ## Tech stack
 
 | Part | Choice |
 |---|---|
-| Gateway | Nginx (open source, official Docker image; njs since Phase 11) |
+| Gateway | Nginx 1.27 (open source, official Docker image; njs since Phase 11) |
 | Second gateway | Envoy 1.38 (`envoy/envoy.yaml`, for comparison, since Phase 11) |
 | Services | Go 1.26 (standard library `net/http`; since Phase 9 `github.com/coder/websocket` and `google.golang.org/grpc` for realtime-service) |
 | Orchestration | Docker Compose |
@@ -35,56 +70,75 @@ The services are intentionally simple. The point of this project is the gateway:
 
 ```
 gatekeeper/
-├── docker-compose.yml
-├── Makefile                 # certs, up, down, reload, test, logs
-├── scripts/certs.sh         # lab CA + gateway certificate (make certs)
-├── scripts/secrets.sh       # signing key, lab users, admin htpasswd (make secrets)
-├── scripts/ready.sh         # make up: wait until every API route reaches its service
-├── scripts/bench*.sh        # make bench, make bench-compare (k6 in a container)
-├── scripts/deploy.sh        # make deploy SERVICE=...: drained rolling redeploy
-├── envoy/envoy.yaml         # the Envoy twin of the gateway (127.0.0.1:9443)
-├── k8s/                     # Ingress and Gateway API examples, never applied
+├── docker-compose.yml       # the stack; only the gateway (and Envoy, on loopback) is published
 ├── docker-compose.njs.yml   # opt-in: the signing key for the njs auth check
+├── Makefile                 # up, test, reload, logs, bench, deploy, down …
 ├── nginx/                   # mounted at /etc/nginx/gatekeeper (nginx -c .../nginx.conf)
-│   ├── nginx.conf           # main context: workers, events, http
-│   ├── conf.d/              # one file per virtual server
-│   ├── njs/                 # njs scripts (auth.js)
-│   └── snippets/            # reusable blocks (proxy headers, ssl, cors)
+│   ├── nginx.conf           # main context: workers, maps, zones, caches, logs
+│   ├── conf.d/              # one file per virtual server, plus the upstream pools
+│   ├── snippets/            # reusable blocks (proxy headers, auth, TLS, CORS, gRPC errors)
+│   └── njs/                 # njs scripts (auth.js)
+├── envoy/envoy.yaml         # the Envoy twin of the gateway (127.0.0.1:9443)
 ├── services/                # one Go module, one Dockerfile (ARG SERVICE)
 │   ├── go.mod
 │   ├── Dockerfile
 │   ├── internal/
-│   │   └── echo/            # shared handler: /health, JSON echo, chaos, request log
+│   │   ├── echo/            # shared handler: /health, JSON echo, chaos, request log
+│   │   ├── auth/            # login, HS256 tokens, /verify
+│   │   └── realtime/        # WebSocket, SSE and gRPC handlers
 │   ├── cmd/
 │   │   ├── user-service/
 │   │   ├── order-service/
 │   │   ├── product-service/
-│   │   └── auth-service/
+│   │   ├── auth-service/
+│   │   └── realtime-service/
 │   └── smoke/               # stack tests run by `make test`
 ├── frontend/                # static files served directly by Nginx (SPA shell + assets/)
 ├── admin/                   # admin.localhost content, outside the main root
 ├── loadtest/                # k6 scenarios, tuning candidates/, results/ (git-ignored)
-└── certs/                   # made by make certs, git-ignored, mounted read-only
+├── scripts/                 # certs, secrets, readiness, bench, bench-compare, deploy
+├── k8s/                     # Ingress and Gateway API examples, never applied
+├── claudedocs/mind-map.md   # the project mind map
+├── certs/                   # made by make certs, git-ignored, mounted read-only
+└── secrets/                 # made by make secrets, git-ignored
 ```
 
 ## Getting started
 
-Requires Docker (with Compose) and Go 1.26+ (grpc-go needs it). Only the gateway is published: HTTPS on `localhost:8443` (the app) and plain HTTP on `localhost:8080` (redirects to HTTPS, plus `/health`); the services are reachable only inside the compose network. `make up` creates the lab certificates on first run (`certs/`, never committed); point curl at the lab CA once per shell with `export CURL_CA_BUNDLE=$PWD/certs/ca.pem` and the examples below work as written (checked with macOS curl 8.7; if your curl ignores the variable, add `--cacert certs/ca.pem`). Since Phase 8 users and orders need a token; get one for the lab user alice once per shell and the examples below send it:
+Requires Docker (with Compose) and Go 1.26+ (grpc-go needs it).
 
 ```bash
-export TOKEN=$(jq -c '{username:"alice",password:.alice.password}' secrets/auth/users.json |
-  curl -s -X POST -H 'Content-Type: application/json' -d @- https://localhost:8443/api/auth/login | jq -r .token)   # valid 15 min
-```
-
-```bash
-make certs     # lab CA + gateway certificate in certs/ (make up runs it)
-make secrets   # signing key, lab users, admin password in secrets/ (make up runs it)
-make up        # build and start everything
+make up        # build and start everything (creates certs/ and secrets/ on first run)
 make test      # smoke test the stack (needs `make up` first; briefly restarts user-service only)
 make test-lifecycle  # make test + the tests that stop/recreate the stack
 make reload    # nginx -t && nginx -s reload (no downtime)
 make logs      # tail the gateway access log
 make down      # stop and remove all containers
+```
+
+`make up` runs `make certs` (lab CA + gateway certificate in `certs/`) and
+`make secrets` (signing key, lab users, admin password in `secrets/`) on first run;
+neither is ever committed.
+
+Only the gateway is published:
+- HTTPS on `localhost:8443`, the app;
+- plain HTTP on `localhost:8080`, which redirects to HTTPS (plus `/health`).
+
+The services are reachable only inside the compose network.
+
+Point curl at the lab CA once per shell, and the examples in this README work as
+written:
+
+```bash
+export CURL_CA_BUNDLE=$PWD/certs/ca.pem   # checked with macOS curl 8.7; otherwise add --cacert certs/ca.pem
+```
+
+Since Phase 8, users and orders need a token. Get one for the lab user alice once per
+shell; the examples send it:
+
+```bash
+export TOKEN=$(jq -c '{username:"alice",password:.alice.password}' secrets/auth/users.json |
+  curl -s -X POST -H 'Content-Type: application/json' -d @- https://localhost:8443/api/auth/login | jq -r .token)   # valid 15 min
 ```
 
 Make a backend slow or flaky (never affects `/health`):
@@ -769,22 +823,25 @@ keep going, roughly from closest to furthest:
 
 ## Roadmap
 
+All 12 phases are done. Each links to the README section it built.
+
 | Phase | Topic | Status |
 |---|---|---|
-| 0 | Foundation: repo skeleton, Go services, Nginx anatomy | ☑ |
-| 1 | Static files & routing | ☑ |
-| 2 | Reverse proxy deep dive: headers, timeouts, buffering | ☑ |
-| 3 | Load balancing & failover | ☑ |
-| 4 | Observability: logs, request ID, metrics | ☑ |
-| 5 | Rate limiting & protection | ☑ |
-| 6 | Caching | ☑ |
-| 7 | TLS & HTTP/2 | ☑ |
-| 8 | Auth at the gateway & CORS | ☑ |
-| 9 | Realtime & gRPC: WebSocket, SSE, gRPC proxy | ☑ |
-| 10 | Performance tuning & zero-downtime | ☑ |
-| 11 | Stretch: njs, Kubernetes Ingress, Nginx vs Envoy | ☑ |
+| 0 | [Foundation: repo skeleton, Go services, Nginx anatomy](#architecture) | ☑ |
+| 1 | [Static files & routing](#routes) | ☑ |
+| 2 | [Reverse proxy deep dive: headers, timeouts, buffering](#proxying) | ☑ |
+| 3 | [Load balancing & failover](#load-balancing) | ☑ |
+| 4 | [Observability: logs, request ID, metrics](#observability) | ☑ |
+| 5 | [Rate limiting & protection](#rate-limiting) | ☑ |
+| 6 | [Caching](#caching) | ☑ |
+| 7 | [TLS & HTTP/2](#tls--http2) | ☑ |
+| 8 | [Auth at the gateway & CORS](#auth--cors) | ☑ |
+| 9 | [Realtime & gRPC: WebSocket, SSE, gRPC proxy](#realtime--grpc) | ☑ |
+| 10 | [Performance tuning & zero-downtime](#performance--zero-downtime) | ☑ |
+| 11 | [Stretch: njs, Kubernetes Ingress, Nginx vs Envoy](#njs) | ☑ |
 
-Detailed phase notes live in `docs/` (kept local, not committed).
+Personal phase notes live in `docs/` (kept local, not committed). For how the
+pieces fit together, see the [mind map](claudedocs/mind-map.md).
 
 ## Learning method
 
