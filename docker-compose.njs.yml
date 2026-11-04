@@ -1,0 +1,10 @@
+# Opt-in for Phase 11's njs auth check (README "njs"), which verifies tokens
+# in the gateway and so needs the HS256 signing key there. That key also lets
+# its holder mint tokens, so the default stack never mounts it (Phase 8):
+#   docker compose -f docker-compose.yml -f docker-compose.njs.yml up -d gateway
+# Just the key, never users.json. A single-file mount: the key changes only
+# with `make secrets`, after which the gateway is recreated anyway.
+services:
+  gateway:
+    volumes:
+      - ./secrets/auth/jwt.key:/etc/nginx/auth-key/jwt.key:ro

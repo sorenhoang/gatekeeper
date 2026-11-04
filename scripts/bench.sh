@@ -5,6 +5,7 @@
 #   DURATION   per run                               (default: 15s)
 #   VUS        concurrent k6 users                   (default: 50)
 #   WARMUP     1 runs the warm-up, 0 skips it         (default: 1)
+#   TARGET     gateway (nginx) or envoy               (default: gateway)
 # One warm-up run per scenario comes first and is discarded: cold runs
 # measured 13.8k, 28.6k and 37.3k req/s in a row on the lab machine.
 # Prints `<scenario> <median_rps> <p95_ms> <failed>`, where failed counts
@@ -18,6 +19,12 @@ RUNS="${RUNS:-3}"
 DURATION="${DURATION:-15s}"
 VUS="${VUS:-50}"
 WARMUP="${WARMUP:-1}"
+TARGET="${TARGET:-gateway}"
+case "$TARGET" in
+gateway) base=https://gateway ;;
+envoy) base=https://envoy:9443 ;;
+*) echo "bench: TARGET must be gateway or envoy, got '$TARGET'" >&2; exit 1 ;;
+esac
 K6_IMAGE="grafana/k6:0.57.0"
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -25,13 +32,17 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$root/loadtest/results"
 gw=$(docker compose --project-directory "$root" ps -q gateway)
 [ -n "$gw" ] || { echo "bench: the gateway isn't running (make up)" >&2; exit 1; }
+if [ "$TARGET" = envoy ] && [ -z "$(docker compose --project-directory "$root" ps -q --status running envoy)" ]; then
+	echo "bench: envoy isn't running (make up)" >&2
+	exit 1
+fi
 # The compose network (the first one the gateway is on): its addresses are
 # exempt from limit_req (Phase 5).
 net=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$gw" | cut -d' ' -f1)
 
 k6() { # k6 <scenario> [summary file]
 	docker run --rm --network "$net" \
-		-e VUS="$VUS" -e DURATION="$DURATION" \
+		-e VUS="$VUS" -e DURATION="$DURATION" -e BASE="$base" \
 		-v "$root/loadtest:/scripts:ro" \
 		-v "$root/secrets/auth/users.json:/secrets/users.json:ro" \
 		-v "$root/loadtest/results:/results" \

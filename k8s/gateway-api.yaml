@@ -1,0 +1,45 @@
+# Example only (README "Kubernetes"): never applied by any Make target.
+# The same routes with Gateway API, the successor to Ingress. Routing,
+# rewrites and TLS are standard fields; auth and rate limits are not part of
+# the core API and attach as the chosen controller's policy resources
+# (e.g. NGINX Gateway Fabric or Envoy Gateway), so they appear only as a note.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gatekeeper
+spec:
+  gatewayClassName: example   # the installed controller's class
+  listeners:
+  - name: https
+    protocol: HTTPS
+    port: 443
+    hostname: gatekeeper.example
+    tls:
+      mode: Terminate
+      certificateRefs: [{ name: gatekeeper-tls }]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api
+spec:
+  parentRefs: [{ name: gatekeeper }]
+  hostnames: [gatekeeper.example]
+  rules:
+  - matches: [{ path: { type: PathPrefix, value: /api/users/ } }]
+    filters:
+    # /api/users/42 → /42
+    - type: URLRewrite
+      urlRewrite: { path: { type: ReplacePrefixMatch, replacePrefixMatch: / } }
+    backendRefs: [{ name: user-service, port: 8080 }]
+  - matches: [{ path: { type: PathPrefix, value: /api/orders/ } }]
+    filters:
+    - type: URLRewrite
+      urlRewrite: { path: { type: ReplacePrefixMatch, replacePrefixMatch: / } }
+    # The three replicas behind one Service; the controller balances them.
+    backendRefs: [{ name: order-service, port: 8080 }]
+  - matches: [{ path: { type: PathPrefix, value: /api/products/ } }]
+    filters:
+    - type: URLRewrite
+      urlRewrite: { path: { type: ReplacePrefixMatch, replacePrefixMatch: / } }
+    backendRefs: [{ name: product-service, port: 8080 }]

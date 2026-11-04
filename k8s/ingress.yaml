@@ -1,0 +1,34 @@
+# Example only (README "Kubernetes"): never applied by any Make target.
+# gatekeeper's routes as a classic Ingress for the ingress-nginx controller,
+# which the Kubernetes project has retired; the annotations below are that
+# controller's own, so this file shows what an existing setup looks like.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gatekeeper
+  annotations:
+    # auth_request → auth-service /verify (Phase 8)
+    nginx.ingress.kubernetes.io/auth-url: http://auth-service.gatekeeper.svc.cluster.local:8080/verify
+    nginx.ingress.kubernetes.io/auth-response-headers: X-User-ID,X-User-Role
+    # limit_req (Phase 5): per client IP, per second
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+    # /api/users/42 → /42 at the service (Phase 2's trailing-slash proxy_pass)
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts: [gatekeeper.example]
+    secretName: gatekeeper-tls
+  rules:
+  - host: gatekeeper.example
+    http:
+      paths:
+      - path: /api/users(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend: { service: { name: user-service, port: { number: 8080 } } }
+      - path: /api/orders(/|$)(.*)
+        pathType: ImplementationSpecific
+        backend: { service: { name: order-service, port: { number: 8080 } } }
+      # Products are public in gatekeeper: on this controller that takes a
+      # second Ingress without the auth-url annotation, not shown here.

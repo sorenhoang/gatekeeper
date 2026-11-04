@@ -49,6 +49,10 @@ func Register(mux *http.ServeMux, cfg Config) {
 	mux.HandleFunc("GET /verify", cfg.verify)
 	// An echo 200 here would read as "allowed" to an auth_request.
 	mux.HandleFunc("/verify", onlyMethod(http.MethodGet))
+	// Envoy's ext_authz (Phase 11) checks at /verify<client path> with the
+	// client's own method. Without this, the echo "/" would answer 200 and
+	// Envoy would let every request through.
+	mux.HandleFunc("/verify/", cfg.verifyEnvoy)
 }
 
 func onlyMethod(m string) http.HandlerFunc {
@@ -86,6 +90,18 @@ func (cfg Config) login(w http.ResponseWriter, r *http.Request) {
 // verify answers the gateway's auth_request subrequest: 204 with the caller's
 // identity, 401 for any bad token, 403 when the role may not do this.
 func (cfg Config) verify(w http.ResponseWriter, r *http.Request) {
+	// The nginx gateway always checks with GET and sends the client's method.
+	cfg.check(w, r, r.Header.Get("X-Original-Method"), http.StatusNoContent)
+}
+
+// verifyEnvoy is the same check for Envoy, whose check request carries the
+// client's method itself. Envoy's ext_authz allows only a 200; any other
+// status, a 204 included, goes back to the client as the denial.
+func (cfg Config) verifyEnvoy(w http.ResponseWriter, r *http.Request) {
+	cfg.check(w, r, r.Method, http.StatusOK)
+}
+
+func (cfg Config) check(w http.ResponseWriter, r *http.Request, method string, allowed int) {
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -97,14 +113,14 @@ func (cfg Config) verify(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	// The gateway sends the client's method; only admins may delete.
-	if r.Header.Get("X-Original-Method") == http.MethodDelete && c.Role != "admin" {
+	// Only admins may delete.
+	if method == http.MethodDelete && c.Role != "admin" {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 	w.Header().Set("X-User-ID", c.Sub)
 	w.Header().Set("X-User-Role", c.Role)
-	w.WriteHeader(http.StatusNoContent)
+	w.WriteHeader(allowed)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
