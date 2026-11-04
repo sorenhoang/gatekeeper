@@ -3,10 +3,14 @@
 Generated 2026-11-04 from `7624c44` (main, after Phases 10 and 11 merged). Scope: the whole lab, Phases 0–11.
 
 A map of what the project is made of and how a request moves through it. Use it as a
-way in before reading the [README](../README.md); every leaf points at the file it
+way in before reading the [README](../README.md) and the [guide](../GUIDE.md); every leaf points at the file it
 comes from.
 
 ## Overview
+
+![Gatekeeper mind map](mind-map.png)
+
+The same map as Mermaid source, rendered by GitHub:
 
 ```mermaid
 mindmap
@@ -115,7 +119,7 @@ flowchart LR
 ```
 
 - TLS terminates at the gateway; HTTP/2 to the client → [tls.conf](../nginx/snippets/tls.conf)
-- location picked: `=`, then longest `^~` prefix, then regex → [README Routes](../README.md#routes)
+- location picked: `=`, then longest `^~` prefix, then regex → [GUIDE Routes](../GUIDE.md#routes)
 - `limit_req` runs in preaccess, before `auth_request` → [nginx.conf](../nginx/nginx.conf)
 - identity from the check reaches the service as `X-User-ID` → [auth-check.conf](../nginx/snippets/auth-check.conf)
 - prefix replaced: `/api/orders/7` arrives as `/7` → [default.conf](../nginx/conf.d/default.conf)
@@ -174,7 +178,7 @@ flowchart LR
 
 - one replica at a time, refuses if one is already down → [deploy.sh](../scripts/deploy.sh)
 - drain = wait for the PIDs of pre-reload workers → [deploy.sh](../scripts/deploy.sh)
-- 0 failed checks under k6 load → [README Zero-downtime](../README.md#zero-downtime)
+- 0 failed checks under k6 load → [GUIDE Zero-downtime](../GUIDE.md#zero-downtime)
 
 ## Data
 
@@ -198,13 +202,13 @@ flowchart LR
 - **Only the gateway is published;** the services stay on the compose network → [docker-compose.yml](../docker-compose.yml)
 - **Tuning is measured:** kept only for a ≥10% gain, interleaved runs → [bench-compare.sh](../scripts/bench-compare.sh)
 - **Config changes go out by reload**, never by recreating the gateway → [Makefile](../Makefile)
-- **Every README claim has a smoke test** → [services/smoke/](../services/smoke/)
+- **Every documented claim has a smoke test** → [services/smoke/](../services/smoke/)
 
 ## Problems & gotchas
 
 - **Directive inheritance:** declaring one `add_header` or `error_page` drops all inherited ones
 - **`return` runs before `auth_request`:** the rewrite phase comes first
-- **An unknown `auth_request` target fails open:** a 2xx from anywhere counts as allowed → [README njs](../README.md#njs)
+- **An unknown `auth_request` target fails open:** a 2xx from anywhere counts as allowed → [GUIDE njs](../GUIDE.md#njs)
 - **`sed -i` breaks a bind mount:** it replaces the inode; edit in place → [deploy.sh](../scripts/deploy.sh)
 - **`nginx -s reload` returns early:** old workers start draining later → [deploy.sh](../scripts/deploy.sh)
 - **Docker DNS:** a stopped container's name vanishes; `resolve` re-resolves → [upstreams.conf](../nginx/conf.d/upstreams.conf)
@@ -230,8 +234,8 @@ flowchart LR
 
 ## Where to start reading
 
-1. [README.md](../README.md): Architecture, Getting started, Routes
+1. [README.md](../README.md): Architecture, Getting started; then [GUIDE.md](../GUIDE.md) Routes
 2. [nginx/nginx.conf](../nginx/nginx.conf): the main context, maps and zones
 3. [nginx/conf.d/default.conf](../nginx/conf.d/default.conf): every route, top to bottom
 4. [nginx/snippets/proxy-headers.conf](../nginx/snippets/proxy-headers.conf) and [auth-check.conf](../nginx/snippets/auth-check.conf): what every proxied request gets
-5. [services/smoke/](../services/smoke/): pick a test for any README claim and run it
+5. [services/smoke/](../services/smoke/): pick a test for any documented claim and run it

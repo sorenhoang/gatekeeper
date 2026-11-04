@@ -14,7 +14,7 @@ import (
 // is in the config, a rejected one's is not. Every candidate file in
 // loadtest/candidates/ has a row, so none is applied or dropped silently.
 func TestShouldConfigureExactlyTheMeasuredKeptCandidates(t *testing.T) {
-	readme, err := os.ReadFile(filepath.Join(repoRoot, "README.md"))
+	readme, err := os.ReadFile(filepath.Join(repoRoot, "GUIDE.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
