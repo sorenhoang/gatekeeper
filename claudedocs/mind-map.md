@@ -1,6 +1,6 @@
 # Gatekeeper — mind map
 
-Generated 2026-11-04 from `ebb0ac5`. Scope: the whole lab, Phases 0–11.
+Generated 2026-11-04 from `7624c44` (main, after Phases 10 and 11 merged). Scope: the whole lab, Phases 0–11.
 
 A map of what the project is made of and how a request moves through it. Use it as a
 way in before reading the [README](../README.md); every leaf points at the file it

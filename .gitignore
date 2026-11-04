@@ -43,3 +43,6 @@ loadtest/results/
 
 # Lab secrets from make secrets
 /secrets/
+
+# Claude Code worktrees and local state
+.claude/
